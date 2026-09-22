@@ -33,7 +33,7 @@ MAX_TELEGRAM_BYTES = (
 MAX_DIRECT_VIDEO_BYTES = (
     1900 * 1024 * 1024 if LOCAL_BOT_API_ENABLED else 45 * 1024 * 1024
 )
-MAX_IMAGE_BYTES = 20 * 1024 * 1024
+MAX_IMAGE_BYTES = (100 * 1024 * 1024 if LOCAL_BOT_API_ENABLED else 20 * 1024 * 1024)
 MAX_IMAGES = 20
 DOWNLOAD_CONCURRENCY = max(1, int(os.getenv("DOWNLOAD_CONCURRENCY", "2")))
 
@@ -444,6 +444,70 @@ def _decode_page_text(text: str) -> str:
     )
 
 
+def _normalize_rednote_image_url(raw: str) -> str:
+    if not isinstance(raw, str):
+        return ""
+    url = _decode_page_text(raw).replace("&amp;", "&").strip()
+    if not url.startswith("http"):
+        return ""
+
+    # RedNote sometimes appends imageView resize operations to otherwise
+    # canonical CDN URLs. Strip those so we fetch the original asset.
+    url = re.sub(r"/imageView\\d+/\\d+/w/\\d+.*$", "", url)
+    return url
+
+
+def _note_image_candidates(note: dict) -> list[str]:
+    if not isinstance(note, dict):
+        return []
+
+    result: list[str] = []
+    seen: set[str] = set()
+
+    for item in note.get("imageList") or []:
+        if not isinstance(item, dict):
+            continue
+
+        candidates = []
+
+        # Canonical full-resolution URL first.
+        for key in ("urlDefault", "url", "urlPre"):
+            value = item.get(key)
+            if isinstance(value, str):
+                candidates.append(value)
+
+        # WB_DFT is generally the default/original display asset.
+        info_list = item.get("infoList") or []
+        if isinstance(info_list, list):
+            wb_dft = [
+                info.get("url")
+                for info in info_list
+                if isinstance(info, dict)
+                and info.get("imageScene") == "WB_DFT"
+                and isinstance(info.get("url"), str)
+            ]
+            other = [
+                info.get("url")
+                for info in info_list
+                if isinstance(info, dict)
+                and isinstance(info.get("url"), str)
+            ]
+            candidates.extend(wb_dft + other)
+
+        chosen = ""
+        for candidate in candidates:
+            normalized = _normalize_rednote_image_url(candidate)
+            if normalized:
+                chosen = normalized
+                break
+
+        if chosen and chosen not in seen:
+            seen.add(chosen)
+            result.append(chosen)
+
+    return result
+
+
 def _image_candidates(page_text: str) -> list[str]:
     decoded = _decode_page_text(page_text)
     soup = BeautifulSoup(decoded, "html.parser")
@@ -482,43 +546,62 @@ def _image_candidates(page_text: str) -> list[str]:
     return result
 
 
-def download_images(url: str, download_dir: Path) -> tuple[list[Path], dict]:
-    response = requests.get(
-        url,
-        headers=_request_headers("https://www.rednote.com/"),
-        timeout=30,
-        allow_redirects=True,
-    )
-    response.raise_for_status()
+def download_images(
+    url: str,
+    download_dir: Path,
+    note: dict | None = None,
+    page_text: str | None = None,
+) -> tuple[list[Path], dict]:
+    response = None
 
-    page_title = ""
-    soup = BeautifulSoup(response.text, "html.parser")
-    og_title = soup.find("meta", attrs={"property": "og:title"})
-    if og_title and og_title.get("content"):
-        page_title = og_title["content"].strip()
-    elif soup.title and soup.title.string:
-        page_title = soup.title.string.strip()
+    candidates = _note_image_candidates(note or {})
 
-    candidates = _image_candidates(response.text)
+    if not candidates:
+        response = requests.get(
+            url,
+            headers=_request_headers("https://www.rednote.com/"),
+            timeout=30,
+            allow_redirects=True,
+        )
+        response.raise_for_status()
+        page_text = response.text
+        candidates = _image_candidates(response.text)
+
     if not candidates:
         raise RuntimeError("No downloadable images were found.")
 
+    page_title = ""
+    if isinstance(note, dict):
+        page_title = str(note.get("title") or "").strip()
+
+    if not page_title and page_text:
+        soup = BeautifulSoup(page_text, "html.parser")
+        og_title = soup.find("meta", attrs={"property": "og:title"})
+        if og_title and og_title.get("content"):
+            page_title = og_title["content"].strip()
+        elif soup.title and soup.title.string:
+            page_title = soup.title.string.strip()
+
+    referer = response.url if response is not None else url
     files: list[Path] = []
     hashes: set[str] = set()
-    for index, image_url in enumerate(candidates):
+
+    for image_url in candidates:
         if len(files) >= MAX_IMAGES:
             break
         try:
             r = requests.get(
                 image_url,
-                headers=_request_headers(response.url),
+                headers=_request_headers(referer),
                 timeout=30,
                 allow_redirects=True,
             )
             r.raise_for_status()
+
             content_type = (r.headers.get("Content-Type") or "").split(";")[0].lower()
             if not content_type.startswith("image/"):
                 continue
+
             data = r.content
             if not data or len(data) > MAX_IMAGE_BYTES:
                 continue
@@ -528,45 +611,48 @@ def download_images(url: str, download_dir: Path) -> tuple[list[Path], dict]:
                 continue
             hashes.add(digest)
 
-            try:
-                image = Image.open(io.BytesIO(data))
-                image = ImageOps.exif_transpose(image)
-                if image.mode != "RGB":
-                    if "A" in image.getbands():
-                        background = Image.new("RGB", image.size, "white")
-                        background.paste(image, mask=image.getchannel("A"))
-                        image = background
-                    else:
-                        image = image.convert("RGB")
+            index = len(files) + 1
 
-                if max(image.size) > 4096:
-                    image.thumbnail((4096, 4096), Image.Resampling.LANCZOS)
+            # Preserve JPEG/PNG bytes exactly. Telegram documents do not
+            # recompress them, so the user receives source quality.
+            if content_type in {"image/jpeg", "image/jpg"}:
+                path = download_dir / f"rednote_{index:02d}.jpg"
+                path.write_bytes(data)
+            elif content_type == "image/png":
+                path = download_dir / f"rednote_{index:02d}.png"
+                path.write_bytes(data)
+            else:
+                # WEBP/AVIF can be rendered sticker-like by Telegram clients.
+                # Convert to lossless PNG instead of lossy JPEG.
+                try:
+                    image = Image.open(io.BytesIO(data))
+                    image = ImageOps.exif_transpose(image)
+                    if image.mode not in ("RGB", "RGBA", "L", "LA"):
+                        image = image.convert("RGBA")
+                    path = download_dir / f"rednote_{index:02d}.png"
+                    image.save(path, format="PNG", optimize=False)
+                except (UnidentifiedImageError, OSError, ValueError):
+                    logger.debug("Original image conversion failed: %s", image_url, exc_info=True)
+                    continue
 
-                path = download_dir / f"image_{len(files) + 1:02d}.jpg"
-                quality = 92
-                image.save(path, format="JPEG", quality=quality, optimize=True)
+            if path.exists() and 0 < path.stat().st_size <= MAX_IMAGE_BYTES:
+                files.append(path)
+                logger.info(
+                    "Downloaded original RedNote image: file=%s bytes=%s source=%s",
+                    path.name,
+                    path.stat().st_size,
+                    image_url,
+                )
+            else:
+                path.unlink(missing_ok=True)
 
-                while path.stat().st_size > 9 * 1024 * 1024 and max(image.size) > 1280:
-                    image.thumbnail(
-                        (max(1280, int(image.width * 0.85)), max(1280, int(image.height * 0.85))),
-                        Image.Resampling.LANCZOS,
-                    )
-                    quality = max(78, quality - 4)
-                    image.save(path, format="JPEG", quality=quality, optimize=True)
-
-                if path.stat().st_size <= 10 * 1024 * 1024:
-                    files.append(path)
-                else:
-                    path.unlink(missing_ok=True)
-            except (UnidentifiedImageError, OSError, ValueError):
-                logger.debug("Image conversion failed: %s", image_url, exc_info=True)
         except requests.RequestException:
             logger.debug("Image candidate failed: %s", image_url, exc_info=True)
 
     if not files:
-        raise RuntimeError("RedNote returned an image post, but the images could not be downloaded.")
+        raise RuntimeError("RedNote returned an image post, but the original images could not be downloaded.")
 
-    return files, {"title": page_title, "webpage_url": response.url}
+    return files, {"title": page_title, "webpage_url": referer}
 
 
 def _probe_media(path: Path) -> dict:
@@ -790,7 +876,12 @@ def download_rednote(url: str, download_dir: Path) -> tuple[list[Path], dict, st
             pass
 
     try:
-        files, info = download_images(resolved, download_dir)
+        files, info = download_images(
+            resolved,
+            download_dir,
+            note=analysis.get("note") if isinstance(analysis, dict) else None,
+            page_text=analysis.get("page_text") if isinstance(analysis, dict) else None,
+        )
         return files, info, "images"
     except Exception as image_error:
         raise RuntimeError(
@@ -874,13 +965,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 else:
                     for index, path in enumerate(paths):
                         with path.open("rb") as file_obj:
-                            await message.reply_photo(
-                                photo=file_obj,
-                                caption=caption if index == 0 else None,
-                                read_timeout=180,
-                                write_timeout=180,
-                                connect_timeout=60,
-                            )
+                            if LOCAL_BOT_API_ENABLED:
+                                await message.reply_document(
+                                    document=file_obj,
+                                    filename=path.name,
+                                    caption=caption if index == 0 else None,
+                                    read_timeout=300,
+                                    write_timeout=300,
+                                    connect_timeout=60,
+                                )
+                            else:
+                                await message.reply_photo(
+                                    photo=file_obj,
+                                    caption=caption if index == 0 else None,
+                                    read_timeout=180,
+                                    write_timeout=180,
+                                    connect_timeout=60,
+                                )
                 try:
                     await status.delete()
                 except BadRequest:
