@@ -39,11 +39,13 @@ jobs:
         uses: appleboy/ssh-action@v1
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
         with:
           host: ${{ secrets.HOST }}
           username: root
           password: ${{ secrets.PASS }}
-          envs: TELEGRAM_BOT_TOKEN
+          envs: TELEGRAM_BOT_TOKEN,TELEGRAM_API_ID,TELEGRAM_API_HASH
           command_timeout: 30m
           script: |
             echo "===== Recent bot logs before deploy ====="
