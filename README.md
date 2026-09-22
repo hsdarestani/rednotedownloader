@@ -47,7 +47,7 @@ RedNote can occasionally return CAPTCHA / risk-control pages to datacenter IPs. 
 
 ## Diagnostics
 
-Production deploys capture recent systemd logs for RedNote download troubleshooting.
+Production deploys capture recent systemd logs for RedNote download troubleshooting and media quality diagnostics.
 
 
 ## Large videos via Local Bot API
