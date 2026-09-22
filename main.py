@@ -1,6 +1,8 @@
 import asyncio
 import hashlib
 import html
+import io
+import json
 import logging
 import mimetypes
 import os
@@ -14,6 +16,7 @@ from urllib.parse import urlparse
 import requests
 import yt_dlp
 from bs4 import BeautifulSoup
+from PIL import Image, ImageOps, UnidentifiedImageError
 from telegram import Update
 from telegram.constants import ChatAction
 from telegram.error import BadRequest, NetworkError, TimedOut
@@ -120,10 +123,10 @@ def _ydl_options(download_dir: Path) -> dict:
 
 
 def _media_files(download_dir: Path) -> list[Path]:
-    ignored = {".part", ".ytdl", ".json", ".description", ".vtt", ".srt"}
+    video_extensions = {".mp4", ".m4v", ".mov", ".webm", ".mkv", ".avi", ".flv", ".ts"}
     files = [
         p for p in download_dir.iterdir()
-        if p.is_file() and p.suffix.lower() not in ignored and not p.name.startswith(".")
+        if p.is_file() and p.suffix.lower() in video_extensions and not p.name.startswith(".")
     ]
     return sorted(files, key=lambda p: p.stat().st_size, reverse=True)
 
@@ -233,12 +236,38 @@ def download_images(url: str, download_dir: Path) -> tuple[list[Path], dict]:
                 continue
             hashes.add(digest)
 
-            ext = mimetypes.guess_extension(content_type) or ".jpg"
-            if ext == ".jpe":
-                ext = ".jpg"
-            path = download_dir / f"image_{len(files) + 1:02d}{ext}"
-            path.write_bytes(data)
-            files.append(path)
+            try:
+                image = Image.open(io.BytesIO(data))
+                image = ImageOps.exif_transpose(image)
+                if image.mode != "RGB":
+                    if "A" in image.getbands():
+                        background = Image.new("RGB", image.size, "white")
+                        background.paste(image, mask=image.getchannel("A"))
+                        image = background
+                    else:
+                        image = image.convert("RGB")
+
+                if max(image.size) > 4096:
+                    image.thumbnail((4096, 4096), Image.Resampling.LANCZOS)
+
+                path = download_dir / f"image_{len(files) + 1:02d}.jpg"
+                quality = 92
+                image.save(path, format="JPEG", quality=quality, optimize=True)
+
+                while path.stat().st_size > 9 * 1024 * 1024 and max(image.size) > 1280:
+                    image.thumbnail(
+                        (max(1280, int(image.width * 0.85)), max(1280, int(image.height * 0.85))),
+                        Image.Resampling.LANCZOS,
+                    )
+                    quality = max(78, quality - 4)
+                    image.save(path, format="JPEG", quality=quality, optimize=True)
+
+                if path.stat().st_size <= 10 * 1024 * 1024:
+                    files.append(path)
+                else:
+                    path.unlink(missing_ok=True)
+            except (UnidentifiedImageError, OSError, ValueError):
+                logger.debug("Image conversion failed: %s", image_url, exc_info=True)
         except requests.RequestException:
             logger.debug("Image candidate failed: %s", image_url, exc_info=True)
 
@@ -248,13 +277,13 @@ def download_images(url: str, download_dir: Path) -> tuple[list[Path], dict]:
     return files, {"title": page_title, "webpage_url": response.url}
 
 
-def _probe_duration(path: Path) -> float | None:
+def _probe_media(path: Path) -> dict:
     try:
         result = subprocess.run(
             [
                 "ffprobe", "-v", "error",
-                "-show_entries", "format=duration",
-                "-of", "default=noprint_wrappers=1:nokey=1",
+                "-show_entries", "format=duration:stream=index,codec_type,codec_name",
+                "-of", "json",
                 str(path),
             ],
             capture_output=True,
@@ -262,39 +291,31 @@ def _probe_duration(path: Path) -> float | None:
             check=True,
             timeout=30,
         )
-        value = float(result.stdout.strip())
-        return value if value > 0 else None
-    except (subprocess.SubprocessError, ValueError, OSError):
-        return None
+        return json.loads(result.stdout or "{}")
+    except (subprocess.SubprocessError, json.JSONDecodeError, OSError):
+        return {}
 
 
-def compress_video(path: Path, duration: float | None = None) -> Path:
-    if path.stat().st_size <= MAX_TELEGRAM_BYTES:
-        return path
-    if not shutil.which("ffmpeg"):
-        raise RuntimeError("Video is too large for Telegram and ffmpeg is unavailable.")
+def _video_stream_info(path: Path) -> tuple[float | None, str | None, str | None]:
+    probe = _probe_media(path)
+    duration = None
+    try:
+        value = float((probe.get("format") or {}).get("duration") or 0)
+        duration = value if value > 0 else None
+    except (TypeError, ValueError):
+        pass
 
-    duration = duration or _probe_duration(path)
-    if not duration:
-        raise RuntimeError("Video is too large for Telegram and its duration could not be detected.")
+    video_codec = None
+    audio_codec = None
+    for stream in probe.get("streams") or []:
+        if stream.get("codec_type") == "video" and video_codec is None:
+            video_codec = stream.get("codec_name")
+        elif stream.get("codec_type") == "audio" and audio_codec is None:
+            audio_codec = stream.get("codec_name")
+    return duration, video_codec, audio_codec
 
-    target_bytes = 44 * 1024 * 1024
-    total_kbps = int((target_bytes * 8) / duration / 1000)
-    audio_kbps = 64 if total_kbps < 500 else 96
-    video_kbps = max(100, total_kbps - audio_kbps - 24)
 
-    output = path.with_name(path.stem + "_telegram.mp4")
-    command = [
-        "ffmpeg", "-y", "-i", str(path),
-        "-vf", "scale=1280:-2:force_original_aspect_ratio=decrease",
-        "-c:v", "libx264", "-preset", "veryfast",
-        "-b:v", f"{video_kbps}k",
-        "-maxrate", f"{video_kbps}k",
-        "-bufsize", f"{video_kbps * 2}k",
-        "-c:a", "aac", "-b:a", f"{audio_kbps}k",
-        "-movflags", "+faststart",
-        str(output),
-    ]
+def _run_ffmpeg(command: list[str]) -> None:
     try:
         subprocess.run(
             command,
@@ -304,15 +325,54 @@ def compress_video(path: Path, duration: float | None = None) -> Path:
             timeout=1800,
         )
     except subprocess.TimeoutExpired as exc:
-        raise RuntimeError("Video compression timed out.") from exc
+        raise RuntimeError("Video conversion timed out.") from exc
     except subprocess.CalledProcessError as exc:
         logger.error("ffmpeg failed: %s", exc.stderr.decode(errors="ignore")[-2000:])
-        raise RuntimeError("Video compression failed.") from exc
+        raise RuntimeError("Video conversion failed.") from exc
+
+
+def prepare_video(path: Path, duration_hint: float | None = None) -> Path:
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        raise RuntimeError("ffmpeg and ffprobe are required for video delivery.")
+
+    duration, video_codec, _ = _video_stream_info(path)
+    duration = duration or duration_hint
+    if not video_codec:
+        raise RuntimeError("Downloaded media is not a real video.")
+
+    output = path.with_name(path.stem + "_telegram.mp4")
+    common = [
+        "ffmpeg", "-y", "-i", str(path),
+        "-map", "0:v:0", "-map", "0:a:0?",
+        "-vf", "scale=1280:-2:force_original_aspect_ratio=decrease",
+        "-c:v", "libx264", "-preset", "veryfast",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "96k",
+        "-movflags", "+faststart",
+    ]
+
+    if path.stat().st_size <= 38 * 1024 * 1024:
+        _run_ffmpeg(common + ["-crf", "22", str(output)])
+    else:
+        if not duration:
+            raise RuntimeError("Video is too large and its duration could not be detected.")
+        target_bytes = 43 * 1024 * 1024
+        total_kbps = int((target_bytes * 8) / duration / 1000)
+        video_kbps = max(120, total_kbps - 120)
+        _run_ffmpeg(
+            common
+            + [
+                "-b:v", f"{video_kbps}k",
+                "-maxrate", f"{video_kbps}k",
+                "-bufsize", f"{video_kbps * 2}k",
+                str(output),
+            ]
+        )
 
     if not output.exists() or output.stat().st_size == 0:
-        raise RuntimeError("Video compression failed.")
+        raise RuntimeError("Video conversion failed.")
     if output.stat().st_size > MAX_TELEGRAM_BYTES:
-        raise RuntimeError("The video is still too large for Telegram after compression.")
+        raise RuntimeError("The converted video is still too large for Telegram.")
     return output
 
 
@@ -322,7 +382,7 @@ def download_rednote(url: str, download_dir: Path) -> tuple[list[Path], dict, st
         files, info = download_video(resolved, download_dir)
         video = files[0]
         duration = info.get("duration") if isinstance(info, dict) else None
-        video = compress_video(video, duration)
+        video = prepare_video(video, duration)
         return [video], info, "video"
     except Exception as video_error:
         logger.info("Video extraction failed, trying image post fallback: %s", video_error)
@@ -379,7 +439,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     status = await message.reply_text("Downloading...")
-    await context.bot.send_chat_action(chat_id=message.chat_id, action=ChatAction.UPLOAD_DOCUMENT)
+    await context.bot.send_chat_action(chat_id=message.chat_id, action=ChatAction.UPLOAD_VIDEO)
 
     async with DOWNLOAD_SEMAPHORE:
         try:
@@ -395,6 +455,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                         await message.reply_video(
                             video=file_obj,
                             caption=caption,
+                            filename="rednote_video.mp4",
                             supports_streaming=True,
                             read_timeout=300,
                             write_timeout=300,
@@ -403,8 +464,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 else:
                     for index, path in enumerate(paths):
                         with path.open("rb") as file_obj:
-                            await message.reply_document(
-                                document=file_obj,
+                            await message.reply_photo(
+                                photo=file_obj,
                                 caption=caption if index == 0 else None,
                                 read_timeout=180,
                                 write_timeout=180,
