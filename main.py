@@ -25,7 +25,14 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 REDNOTE_COOKIE = os.getenv("REDNOTE_COOKIE", "").strip()
-MAX_TELEGRAM_BYTES = 47 * 1024 * 1024
+LOCAL_BOT_API_URL = os.getenv("LOCAL_BOT_API_URL", "").strip().rstrip("/")
+LOCAL_BOT_API_ENABLED = bool(LOCAL_BOT_API_URL)
+MAX_TELEGRAM_BYTES = (
+    1900 * 1024 * 1024 if LOCAL_BOT_API_ENABLED else 47 * 1024 * 1024
+)
+MAX_DIRECT_VIDEO_BYTES = (
+    1900 * 1024 * 1024 if LOCAL_BOT_API_ENABLED else 45 * 1024 * 1024
+)
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
 MAX_IMAGES = 20
 DOWNLOAD_CONCURRENCY = max(1, int(os.getenv("DOWNLOAD_CONCURRENCY", "2")))
@@ -274,11 +281,11 @@ def _analyze_rednote_page(url: str) -> dict:
         codec = (item.get("video_codec") or "").lower()
         if item.get("origin"):
             group = 4
-        elif 0 < size <= 45 * 1024 * 1024 and codec in {"h264", "avc", "avc1", ""}:
+        elif 0 < size <= MAX_DIRECT_VIDEO_BYTES and codec in {"h264", "avc", "avc1", ""}:
             group = 0
         elif size == 0 and codec in {"h264", "avc", "avc1", ""}:
             group = 1
-        elif 0 < size <= 45 * 1024 * 1024:
+        elif 0 < size <= MAX_DIRECT_VIDEO_BYTES:
             group = 2
         else:
             group = 3
@@ -303,7 +310,7 @@ def _analyze_rednote_page(url: str) -> dict:
 
 def _download_direct_video(candidates: list[dict], download_dir: Path, referer: str) -> tuple[list[Path], dict]:
     errors = []
-    safe_limit = 45 * 1024 * 1024
+    safe_limit = MAX_DIRECT_VIDEO_BYTES
 
     for index, candidate in enumerate(candidates[:12], start=1):
         media_url = candidate.get("url")
@@ -623,8 +630,11 @@ def prepare_video(path: Path, duration_hint: float | None = None) -> Path:
     _, video_codec, audio_codec = _video_stream_info(path)
     if not video_codec:
         raise RuntimeError("Downloaded media is not a real video.")
-    if path.stat().st_size > 45 * 1024 * 1024:
-        raise RuntimeError("Video is larger than the Telegram-safe limit.")
+    if path.stat().st_size > MAX_DIRECT_VIDEO_BYTES:
+        raise RuntimeError(
+            f"Video is larger than the configured Telegram upload limit "
+            f"({MAX_DIRECT_VIDEO_BYTES} bytes)."
+        )
     if video_codec not in {"h264", "avc1"}:
         raise RuntimeError(f"Video codec {video_codec} is not Telegram-native H.264.")
 
@@ -820,10 +830,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             logger.exception("Download failed")
             text = str(exc)
             lowered = text.lower()
-            if any(word in lowered for word in ("captcha", "blocked", "403", "risk", "login")):
+            if (
+                not LOCAL_BOT_API_ENABLED
+                and any(
+                    marker in lowered
+                    for marker in (
+                        "larger than the configured telegram upload limit",
+                        "telegram-safe",
+                        "candidate 1 skipped",
+                        "too large",
+                    )
+                )
+            ):
                 friendly = (
-                    "RedNote blocked the server request or requires verification for this post. "
+                    "This RedNote video is larger than Telegram's standard bot upload limit. "
+                    "Large-file mode is not enabled on the server yet."
+                )
+            elif any(word in lowered for word in ("captcha", "risk", "login")):
+                friendly = (
+                    "RedNote requires verification for this post. "
                     "Try another public share link."
+                )
+            elif "403" in lowered:
+                friendly = (
+                    "RedNote refused one of the media CDN links for this post. "
+                    "Please try the link again."
                 )
             else:
                 friendly = (
@@ -844,12 +875,22 @@ def main() -> None:
     if not BOT_TOKEN:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is not set.")
 
-    application = (
+    builder = (
         Application.builder()
         .token(BOT_TOKEN)
         .concurrent_updates(4)
-        .build()
     )
+
+    if LOCAL_BOT_API_ENABLED:
+        logger.info("Using local Telegram Bot API at %s", LOCAL_BOT_API_URL)
+        builder = (
+            builder
+            .base_url(f"{LOCAL_BOT_API_URL}/bot")
+            .base_file_url(f"{LOCAL_BOT_API_URL}/file/bot")
+            .local_mode(True)
+        )
+
+    application = builder.build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
