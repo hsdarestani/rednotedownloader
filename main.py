@@ -11,10 +11,11 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 import requests
 import yt_dlp
+from yt_dlp.utils import js_to_json
 from bs4 import BeautifulSoup
 from PIL import Image, ImageOps, UnidentifiedImageError
 from telegram import Update
@@ -98,6 +99,219 @@ def resolve_share_url(url: str) -> str:
     return url
 
 
+def _normalize_for_ytdlp(url: str) -> str:
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    path = parsed.path
+
+    if "rednote.com" in host:
+        if path.startswith("/search_result/"):
+            path = "/explore/" + path.split("/search_result/", 1)[1]
+        parsed = parsed._replace(netloc="www.xiaohongshu.com", path=path)
+        return urlunparse(parsed)
+    return url
+
+
+def _balanced_js_object(source: str, marker: str) -> str | None:
+    marker_index = source.find(marker)
+    if marker_index < 0:
+        return None
+
+    start = source.find("{", marker_index + len(marker))
+    if start < 0:
+        return None
+
+    depth = 0
+    quote = None
+    escaped = False
+    for index in range(start, len(source)):
+        ch = source[index]
+        if quote:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == quote:
+                quote = None
+            continue
+
+        if ch in {'"', "'", "`"}:
+            quote = ch
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start:index + 1]
+    return None
+
+
+def _extract_initial_state(page_text: str) -> dict:
+    raw = _balanced_js_object(page_text, "window.__INITIAL_STATE__")
+    if not raw:
+        return {}
+    try:
+        return json.loads(js_to_json(raw))
+    except Exception:
+        logger.debug("Could not parse RedNote initial state", exc_info=True)
+        return {}
+
+
+def _find_note_info(initial_state: dict, url: str) -> dict:
+    note_map = (
+        initial_state.get("note", {}).get("noteDetailMap", {})
+        if isinstance(initial_state, dict)
+        else {}
+    )
+    if not isinstance(note_map, dict) or not note_map:
+        return {}
+
+    path_parts = [part for part in urlparse(url).path.split("/") if part]
+    candidate_id = next(
+        (part for part in reversed(path_parts) if re.fullmatch(r"[0-9a-fA-F]{16,32}", part)),
+        None,
+    )
+    if candidate_id and candidate_id in note_map:
+        item = note_map.get(candidate_id) or {}
+        return item.get("note") or item
+
+    for item in note_map.values():
+        if not isinstance(item, dict):
+            continue
+        note = item.get("note") if isinstance(item.get("note"), dict) else item
+        if isinstance(note, dict) and note:
+            return note
+    return {}
+
+
+def _walk_dicts(value):
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from _walk_dicts(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _walk_dicts(child)
+
+
+def _analyze_rednote_page(url: str) -> dict:
+    response = requests.get(
+        url,
+        headers=_request_headers("https://www.rednote.com/"),
+        timeout=30,
+        allow_redirects=True,
+    )
+    response.raise_for_status()
+
+    state = _extract_initial_state(response.text)
+    note = _find_note_info(state, response.url)
+    title = ""
+    soup = BeautifulSoup(response.text, "html.parser")
+    og_title = soup.find("meta", attrs={"property": "og:title"})
+    if og_title and og_title.get("content"):
+        title = og_title["content"].strip()
+    elif isinstance(note, dict):
+        title = str(note.get("title") or "").strip()
+
+    video = note.get("video") if isinstance(note, dict) else None
+    video_candidates = []
+    if isinstance(video, dict):
+        for item in _walk_dicts(video.get("media", {}).get("stream", {})):
+            urls = []
+            master = item.get("masterUrl")
+            if isinstance(master, str) and master.startswith("http"):
+                urls.append(master)
+            backups = item.get("backupUrls")
+            if isinstance(backups, list):
+                urls.extend(u for u in backups if isinstance(u, str) and u.startswith("http"))
+            if not urls:
+                continue
+            try:
+                size = int(item.get("size") or 0)
+            except (TypeError, ValueError):
+                size = 0
+            try:
+                height = int(item.get("height") or 0)
+            except (TypeError, ValueError):
+                height = 0
+            for media_url in urls:
+                video_candidates.append({
+                    "url": media_url,
+                    "size": size,
+                    "height": height,
+                })
+
+        origin_key = (
+            video.get("consumer", {}).get("originVideoKey")
+            if isinstance(video.get("consumer"), dict)
+            else None
+        )
+        if isinstance(origin_key, str) and origin_key:
+            video_candidates.append({
+                "url": f"https://sns-video-bd.xhscdn.com/{origin_key}",
+                "size": 0,
+                "height": 99999,
+            })
+
+    # Prefer an ordinary <=1080p stream over the often huge original source.
+    video_candidates.sort(
+        key=lambda x: (
+            x.get("height", 0) > 1080,
+            x.get("size", 0) == 0,
+            -(x.get("height", 0) or 0),
+            x.get("size", 0) or 10**18,
+        )
+    )
+
+    return {
+        "resolved_url": response.url,
+        "title": title,
+        "note": note,
+        "has_state": bool(state),
+        "has_video": bool(video_candidates),
+        "video_candidates": video_candidates,
+        "page_text": response.text,
+    }
+
+
+def _download_direct_video(candidates: list[dict], download_dir: Path, referer: str) -> tuple[list[Path], dict]:
+    errors = []
+    for index, candidate in enumerate(candidates[:8], start=1):
+        media_url = candidate.get("url")
+        if not media_url:
+            continue
+        try:
+            response = requests.get(
+                media_url,
+                headers=_request_headers(referer),
+                timeout=45,
+                stream=True,
+                allow_redirects=True,
+            )
+            response.raise_for_status()
+            content_type = (response.headers.get("Content-Type") or "").lower()
+            if "text/html" in content_type or "application/json" in content_type:
+                raise RuntimeError(f"Unexpected media response: {content_type}")
+
+            path = download_dir / f"rednote_direct_{index}.mp4"
+            with path.open("wb") as output:
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        output.write(chunk)
+
+            if path.stat().st_size < 1024:
+                raise RuntimeError("Downloaded video is empty.")
+            _, video_codec, _ = _video_stream_info(path)
+            if not video_codec:
+                raise RuntimeError("Downloaded stream is not a video.")
+            return [path], {"title": "", "webpage_url": referer}
+        except Exception as exc:
+            errors.append(str(exc))
+            logger.info("Direct RedNote video candidate failed: %s", exc)
+
+    raise RuntimeError("Direct RedNote video download failed: " + " | ".join(errors[-3:]))
+
+
 def _ydl_options(download_dir: Path) -> dict:
     headers = {
         "User-Agent": USER_AGENT,
@@ -132,8 +346,9 @@ def _media_files(download_dir: Path) -> list[Path]:
 
 
 def download_video(url: str, download_dir: Path) -> tuple[list[Path], dict]:
+    ytdlp_url = _normalize_for_ytdlp(url)
     with yt_dlp.YoutubeDL(_ydl_options(download_dir)) as ydl:
-        info = ydl.extract_info(url, download=True)
+        info = ydl.extract_info(ytdlp_url, download=True)
     files = _media_files(download_dir)
     if not files:
         raise RuntimeError("No downloadable video file was produced.")
@@ -378,15 +593,28 @@ def prepare_video(path: Path, duration_hint: float | None = None) -> Path:
 
 def download_rednote(url: str, download_dir: Path) -> tuple[list[Path], dict, str]:
     resolved = resolve_share_url(url)
+    analysis = {}
+    try:
+        analysis = _analyze_rednote_page(resolved)
+        resolved = analysis.get("resolved_url") or resolved
+    except Exception as exc:
+        logger.info("RedNote page analysis failed: %s", exc)
+
+    video_error = None
     try:
         files, info = download_video(resolved, download_dir)
         video = files[0]
         duration = info.get("duration") if isinstance(info, dict) else None
         video = prepare_video(video, duration)
+        if isinstance(info, dict) and not info.get("title") and analysis.get("title"):
+            info["title"] = analysis["title"]
         return [video], info, "video"
-    except Exception as video_error:
-        logger.info("Video extraction failed, trying image post fallback: %s", video_error)
-        # Remove partial/video files before the image fallback.
+    except Exception as exc:
+        video_error = exc
+        logger.info("yt-dlp RedNote video extraction failed: %s", exc)
+
+    # If the page itself says this is a video note, never fall back to cover images.
+    if analysis.get("has_video"):
         for path in download_dir.iterdir():
             try:
                 if path.is_file():
@@ -394,12 +622,35 @@ def download_rednote(url: str, download_dir: Path) -> tuple[list[Path], dict, st
             except OSError:
                 pass
         try:
-            files, info = download_images(resolved, download_dir)
-            return files, info, "images"
-        except Exception as image_error:
+            files, info = _download_direct_video(
+                analysis.get("video_candidates") or [],
+                download_dir,
+                resolved,
+            )
+            video = prepare_video(files[0])
+            info["title"] = analysis.get("title") or info.get("title") or ""
+            return [video], info, "video"
+        except Exception as direct_error:
             raise RuntimeError(
-                f"Could not download this RedNote post. Video: {video_error}. Images: {image_error}"
-            ) from image_error
+                f"This is a video post, but video download failed. "
+                f"yt-dlp: {video_error}. Direct: {direct_error}"
+            ) from direct_error
+
+    # Only use image fallback when the page is an image note, or type detection was impossible.
+    for path in download_dir.iterdir():
+        try:
+            if path.is_file():
+                path.unlink()
+        except OSError:
+            pass
+
+    try:
+        files, info = download_images(resolved, download_dir)
+        return files, info, "images"
+    except Exception as image_error:
+        raise RuntimeError(
+            f"Could not download this RedNote post. Video: {video_error}. Images: {image_error}"
+        ) from image_error
 
 
 def clean_caption(info: dict) -> str:
