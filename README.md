@@ -43,3 +43,8 @@ The workflow installs Python, ffmpeg and the app under `/opt/rednotedownloader`,
 ## Notes
 
 RedNote can occasionally return CAPTCHA / risk-control pages to datacenter IPs. The bot reports this cleanly instead of hanging. An optional `REDNOTE_COOKIE` can be added later if needed.
+
+
+## Diagnostics
+
+Production deploys capture recent systemd logs for RedNote download troubleshooting.
