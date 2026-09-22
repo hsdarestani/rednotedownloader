@@ -234,11 +234,16 @@ def _analyze_rednote_page(url: str) -> dict:
                 height = int(item.get("height") or 0)
             except (TypeError, ValueError):
                 height = 0
+            try:
+                bitrate = int(item.get("avgBitrate") or item.get("videoBitrate") or 0)
+            except (TypeError, ValueError):
+                bitrate = 0
             for media_url in urls:
                 video_candidates.append({
                     "url": media_url,
                     "size": size,
                     "height": height,
+                    "bitrate": bitrate,
                 })
 
         origin_key = (
@@ -251,15 +256,17 @@ def _analyze_rednote_page(url: str) -> dict:
                 "url": f"https://sns-video-bd.xhscdn.com/{origin_key}",
                 "size": 0,
                 "height": 99999,
+                "bitrate": 0,
             })
 
-    # Prefer an ordinary <=1080p stream over the often huge original source.
+    # Prefer the highest-quality stream that is likely to fit Telegram without compression.
+    # Known files <= Telegram limit come first, ordered by resolution and bitrate.
     video_candidates.sort(
         key=lambda x: (
-            x.get("height", 0) > 1080,
-            x.get("size", 0) == 0,
+            not (0 < (x.get("size") or 0) <= MAX_TELEGRAM_BYTES),
             -(x.get("height", 0) or 0),
-            x.get("size", 0) or 10**18,
+            -(x.get("bitrate", 0) or 0),
+            x.get("size", 0) == 0,
         )
     )
 
@@ -550,36 +557,67 @@ def prepare_video(path: Path, duration_hint: float | None = None) -> Path:
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
         raise RuntimeError("ffmpeg and ffprobe are required for video delivery.")
 
-    duration, video_codec, _ = _video_stream_info(path)
+    duration, video_codec, audio_codec = _video_stream_info(path)
     duration = duration or duration_hint
     if not video_codec:
         raise RuntimeError("Downloaded media is not a real video.")
 
-    output = path.with_name(path.stem + "_telegram.mp4")
-    common = [
-        "ffmpeg", "-y", "-i", str(path),
-        "-map", "0:v:0", "-map", "0:a:0?",
-        "-vf", "scale=1280:-2:force_original_aspect_ratio=decrease",
-        "-c:v", "libx264", "-preset", "veryfast",
-        "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "96k",
-        "-movflags", "+faststart",
-    ]
+    # Best case: keep the original video bit-for-bit and only remux it into MP4.
+    # This avoids the quality loss caused by unnecessary transcoding.
+    if (
+        path.stat().st_size <= 45 * 1024 * 1024
+        and video_codec in {"h264", "avc1"}
+        and audio_codec in {None, "aac"}
+    ):
+        output = path.with_name(path.stem + "_telegram.mp4")
+        command = [
+            "ffmpeg", "-y", "-i", str(path),
+            "-map", "0:v:0", "-map", "0:a:0?",
+            "-c", "copy",
+            "-movflags", "+faststart",
+            str(output),
+        ]
+        _run_ffmpeg(command)
+        if output.exists() and 0 < output.stat().st_size <= MAX_TELEGRAM_BYTES:
+            return output
 
+    output = path.with_name(path.stem + "_telegram.mp4")
+
+    # If we must transcode for compatibility, preserve source resolution and use
+    # a visually high-quality CRF. Do not downscale every video to 1280px.
     if path.stat().st_size <= 38 * 1024 * 1024:
-        _run_ffmpeg(common + ["-crf", "22", str(output)])
+        _run_ffmpeg(
+            [
+                "ffmpeg", "-y", "-i", str(path),
+                "-map", "0:v:0", "-map", "0:a:0?",
+                "-c:v", "libx264", "-preset", "medium",
+                "-crf", "18",
+                "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-b:a", "128k",
+                "-movflags", "+faststart",
+                str(output),
+            ]
+        )
     else:
         if not duration:
             raise RuntimeError("Video is too large and its duration could not be detected.")
-        target_bytes = 43 * 1024 * 1024
+
+        target_bytes = 44 * 1024 * 1024
         total_kbps = int((target_bytes * 8) / duration / 1000)
-        video_kbps = max(120, total_kbps - 120)
+        audio_kbps = 128
+        video_kbps = max(180, total_kbps - audio_kbps - 24)
+
         _run_ffmpeg(
-            common
-            + [
+            [
+                "ffmpeg", "-y", "-i", str(path),
+                "-map", "0:v:0", "-map", "0:a:0?",
+                "-c:v", "libx264", "-preset", "medium",
                 "-b:v", f"{video_kbps}k",
                 "-maxrate", f"{video_kbps}k",
                 "-bufsize", f"{video_kbps * 2}k",
+                "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-b:a", f"{audio_kbps}k",
+                "-movflags", "+faststart",
                 str(output),
             ]
         )
