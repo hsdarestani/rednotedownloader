@@ -57,4 +57,4 @@ For original-quality RedNote videos larger than Telegram's standard 50 MB bot up
 - `TELEGRAM_API_ID`
 - `TELEGRAM_API_HASH`
 
-Obtain them from Telegram's API development tools at my.telegram.org. When both are present, deployment automatically provisions a local Bot API server and switches the bot to large-file mode (up to 2000 MB).
+Obtain them from Telegram's API development tools at my.telegram.org. When both are present, deployment automatically provisions a local Bot API server and switches the bot to large-file mode (up to 2000 MB). Deployment is re-triggered after credential setup.
