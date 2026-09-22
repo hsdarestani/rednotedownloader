@@ -244,6 +244,10 @@ def _analyze_rednote_page(url: str) -> dict:
                     "size": size,
                     "height": height,
                     "bitrate": bitrate,
+                    "video_codec": str(item.get("videoCodec") or "").lower(),
+                    "audio_codec": str(item.get("audioCodec") or "").lower(),
+                    "quality": str(item.get("qualityType") or ""),
+                    "origin": False,
                 })
 
         origin_key = (
@@ -255,20 +259,36 @@ def _analyze_rednote_page(url: str) -> dict:
             video_candidates.append({
                 "url": f"https://sns-video-bd.xhscdn.com/{origin_key}",
                 "size": 0,
-                "height": 99999,
+                "height": 0,
                 "bitrate": 0,
+                "video_codec": "",
+                "audio_codec": "",
+                "quality": "origin",
+                "origin": True,
             })
 
-    # Prefer the highest-quality stream that is likely to fit Telegram without compression.
-    # Known files <= Telegram limit come first, ordered by resolution and bitrate.
-    video_candidates.sort(
-        key=lambda x: (
-            not (0 < (x.get("size") or 0) <= MAX_TELEGRAM_BYTES),
-            -(x.get("height", 0) or 0),
-            -(x.get("bitrate", 0) or 0),
-            x.get("size", 0) == 0,
+    # Prefer native H.264 streams that already fit Telegram. Unknown-size streams
+    # are checked from HTTP headers before downloading; the origin URL is last.
+    def candidate_rank(item: dict) -> tuple:
+        size = item.get("size") or 0
+        codec = (item.get("video_codec") or "").lower()
+        if item.get("origin"):
+            group = 4
+        elif 0 < size <= 45 * 1024 * 1024 and codec in {"h264", "avc", "avc1", ""}:
+            group = 0
+        elif size == 0 and codec in {"h264", "avc", "avc1", ""}:
+            group = 1
+        elif 0 < size <= 45 * 1024 * 1024:
+            group = 2
+        else:
+            group = 3
+        return (
+            group,
+            -(item.get("height", 0) or 0),
+            -(item.get("bitrate", 0) or 0),
         )
-    )
+
+    video_candidates.sort(key=candidate_rank)
 
     return {
         "resolved_url": response.url,
@@ -283,40 +303,83 @@ def _analyze_rednote_page(url: str) -> dict:
 
 def _download_direct_video(candidates: list[dict], download_dir: Path, referer: str) -> tuple[list[Path], dict]:
     errors = []
-    for index, candidate in enumerate(candidates[:8], start=1):
+    safe_limit = 45 * 1024 * 1024
+
+    for index, candidate in enumerate(candidates[:12], start=1):
         media_url = candidate.get("url")
         if not media_url:
             continue
+
+        declared_size = int(candidate.get("size") or 0)
+        if declared_size > safe_limit:
+            errors.append(f"candidate {index} skipped: {declared_size} bytes")
+            continue
+
         try:
             response = requests.get(
                 media_url,
                 headers=_request_headers(referer),
-                timeout=(10, 20),
+                timeout=(8, 18),
                 stream=True,
                 allow_redirects=True,
             )
             response.raise_for_status()
+
             content_type = (response.headers.get("Content-Type") or "").lower()
             if "text/html" in content_type or "application/json" in content_type:
                 raise RuntimeError(f"Unexpected media response: {content_type}")
 
+            try:
+                header_size = int(response.headers.get("Content-Length") or 0)
+            except (TypeError, ValueError):
+                header_size = 0
+
+            if header_size > safe_limit:
+                response.close()
+                errors.append(f"candidate {index} too large from header: {header_size} bytes")
+                continue
+
             path = download_dir / f"rednote_direct_{index}.mp4"
+            downloaded = 0
+            too_large = False
             with path.open("wb") as output:
                 for chunk in response.iter_content(chunk_size=1024 * 1024):
-                    if chunk:
-                        output.write(chunk)
+                    if not chunk:
+                        continue
+                    downloaded += len(chunk)
+                    if downloaded > safe_limit:
+                        too_large = True
+                        break
+                    output.write(chunk)
+            response.close()
 
-            if path.stat().st_size < 1024:
+            if too_large:
+                path.unlink(missing_ok=True)
+                errors.append(f"candidate {index} exceeded Telegram-safe size")
+                continue
+            if not path.exists() or path.stat().st_size < 1024:
+                path.unlink(missing_ok=True)
                 raise RuntimeError("Downloaded video is empty.")
-            _, video_codec, _ = _video_stream_info(path)
-            if not video_codec:
-                raise RuntimeError("Downloaded stream is not a video.")
-            return [path], {"title": "", "webpage_url": referer}
+
+            _, video_codec, audio_codec = _video_stream_info(path)
+            if video_codec not in {"h264", "avc1"}:
+                path.unlink(missing_ok=True)
+                errors.append(f"candidate {index} skipped: codec={video_codec}")
+                continue
+
+            return [path], {
+                "title": "",
+                "webpage_url": referer,
+                "duration": None,
+                "source_size": path.stat().st_size,
+                "video_codec": video_codec,
+                "audio_codec": audio_codec,
+            }
         except Exception as exc:
             errors.append(str(exc))
             logger.info("Direct RedNote video candidate failed: %s", exc)
 
-    raise RuntimeError("Direct RedNote video download failed: " + " | ".join(errors[-3:]))
+    raise RuntimeError("No Telegram-safe H.264 RedNote stream found: " + " | ".join(errors[-5:]))
 
 
 def _ydl_options(download_dir: Path) -> dict:
@@ -328,7 +391,7 @@ def _ydl_options(download_dir: Path) -> dict:
         headers["Cookie"] = REDNOTE_COOKIE
 
     return {
-        "format": "best[filesize<47M]/best[filesize_approx<47M]/best[height<=1080]/best",
+        "format": "best[vcodec^=avc][filesize<45M]/best[vcodec^=avc][filesize_approx<45M]/best[vcodec^=avc][height<=1080]/best[filesize<45M]/best[height<=1080]",
         "outtmpl": str(download_dir / "%(id)s.%(ext)s"),
         "merge_output_format": "mp4",
         "noplaylist": True,
@@ -544,7 +607,7 @@ def _run_ffmpeg(command: list[str]) -> None:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             check=True,
-            timeout=120,
+            timeout=40,
         )
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError("Video conversion timed out.") from exc
@@ -557,19 +620,18 @@ def prepare_video(path: Path, duration_hint: float | None = None) -> Path:
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
         raise RuntimeError("ffmpeg and ffprobe are required for video delivery.")
 
-    duration, video_codec, audio_codec = _video_stream_info(path)
-    duration = duration or duration_hint
+    _, video_codec, audio_codec = _video_stream_info(path)
     if not video_codec:
         raise RuntimeError("Downloaded media is not a real video.")
+    if path.stat().st_size > 45 * 1024 * 1024:
+        raise RuntimeError("Video is larger than the Telegram-safe limit.")
+    if video_codec not in {"h264", "avc1"}:
+        raise RuntimeError(f"Video codec {video_codec} is not Telegram-native H.264.")
 
-    # Best case: keep the original video bit-for-bit and only remux it into MP4.
-    # This avoids the quality loss caused by unnecessary transcoding.
-    if (
-        path.stat().st_size <= 45 * 1024 * 1024
-        and video_codec in {"h264", "avc1"}
-        and audio_codec in {None, "aac"}
-    ):
-        output = path.with_name(path.stem + "_telegram.mp4")
+    output = path.with_name(path.stem + "_telegram.mp4")
+
+    # Never re-encode video here. Preserve source quality bit-for-bit.
+    if audio_codec in {None, "aac"}:
         command = [
             "ffmpeg", "-y", "-i", str(path),
             "-map", "0:v:0", "-map", "0:a:0?",
@@ -577,55 +639,23 @@ def prepare_video(path: Path, duration_hint: float | None = None) -> Path:
             "-movflags", "+faststart",
             str(output),
         ]
-        _run_ffmpeg(command)
-        if output.exists() and 0 < output.stat().st_size <= MAX_TELEGRAM_BYTES:
-            return output
-
-    output = path.with_name(path.stem + "_telegram.mp4")
-
-    # If we must transcode for compatibility, preserve source resolution and use
-    # a visually high-quality CRF. Do not downscale every video to 1280px.
-    if path.stat().st_size <= 38 * 1024 * 1024:
-        _run_ffmpeg(
-            [
-                "ffmpeg", "-y", "-i", str(path),
-                "-map", "0:v:0", "-map", "0:a:0?",
-                "-c:v", "libx264", "-preset", "medium",
-                "-crf", "18",
-                "-pix_fmt", "yuv420p",
-                "-c:a", "aac", "-b:a", "128k",
-                "-movflags", "+faststart",
-                str(output),
-            ]
-        )
     else:
-        if not duration:
-            raise RuntimeError("Video is too large and its duration could not be detected.")
+        # Audio-only conversion is fast; the video track is still copied unchanged.
+        command = [
+            "ffmpeg", "-y", "-i", str(path),
+            "-map", "0:v:0", "-map", "0:a:0?",
+            "-c:v", "copy",
+            "-c:a", "aac", "-b:a", "128k",
+            "-movflags", "+faststart",
+            str(output),
+        ]
 
-        target_bytes = 44 * 1024 * 1024
-        total_kbps = int((target_bytes * 8) / duration / 1000)
-        audio_kbps = 128
-        video_kbps = max(180, total_kbps - audio_kbps - 24)
-
-        _run_ffmpeg(
-            [
-                "ffmpeg", "-y", "-i", str(path),
-                "-map", "0:v:0", "-map", "0:a:0?",
-                "-c:v", "libx264", "-preset", "medium",
-                "-b:v", f"{video_kbps}k",
-                "-maxrate", f"{video_kbps}k",
-                "-bufsize", f"{video_kbps * 2}k",
-                "-pix_fmt", "yuv420p",
-                "-c:a", "aac", "-b:a", f"{audio_kbps}k",
-                "-movflags", "+faststart",
-                str(output),
-            ]
-        )
+    _run_ffmpeg(command)
 
     if not output.exists() or output.stat().st_size == 0:
-        raise RuntimeError("Video conversion failed.")
+        raise RuntimeError("Video remux failed.")
     if output.stat().st_size > MAX_TELEGRAM_BYTES:
-        raise RuntimeError("The converted video is still too large for Telegram.")
+        raise RuntimeError("Remuxed video is still too large for Telegram.")
     return output
 
 
@@ -748,7 +778,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             with tempfile.TemporaryDirectory(prefix="rednote_") as tmp:
                 paths, info, media_type = await asyncio.wait_for(
                     asyncio.to_thread(download_rednote, url, Path(tmp)),
-                    timeout=110,
+                    timeout=90,
                 )
                 caption = clean_caption(info)
 
@@ -781,7 +811,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         except asyncio.TimeoutError:
             logger.exception("RedNote download timed out")
             await status.edit_text(
-                "RedNote did not respond in time. Please try the link again."
+                "RedNote's media servers did not return a usable video in time. Please try again."
             )
         except (TimedOut, NetworkError):
             logger.exception("Telegram network error")
