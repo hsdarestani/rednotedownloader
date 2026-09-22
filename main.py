@@ -574,7 +574,7 @@ def _probe_media(path: Path) -> dict:
         result = subprocess.run(
             [
                 "ffprobe", "-v", "error",
-                "-show_entries", "format=duration:stream=index,codec_type,codec_name",
+                "-show_entries", "format=duration,format_name,start_time:stream=index,codec_type,codec_name,width,height,duration,start_time,time_base",
                 "-of", "json",
                 str(path),
             ],
@@ -623,11 +623,48 @@ def _run_ffmpeg(command: list[str]) -> None:
         raise RuntimeError("Video conversion failed.") from exc
 
 
+def _telegram_video_metadata(path: Path) -> tuple[int | None, int | None, int | None]:
+    probe = _probe_media(path)
+    duration = None
+    width = None
+    height = None
+
+    try:
+        value = float((probe.get("format") or {}).get("duration") or 0)
+        if value > 0:
+            duration = max(1, int(round(value)))
+    except (TypeError, ValueError):
+        pass
+
+    for stream in probe.get("streams") or []:
+        if stream.get("codec_type") != "video":
+            continue
+        try:
+            width = int(stream.get("width") or 0) or None
+        except (TypeError, ValueError):
+            width = None
+        try:
+            height = int(stream.get("height") or 0) or None
+        except (TypeError, ValueError):
+            height = None
+        if duration is None:
+            try:
+                value = float(stream.get("duration") or 0)
+                if value > 0:
+                    duration = max(1, int(round(value)))
+            except (TypeError, ValueError):
+                pass
+        break
+
+    return duration, width, height
+
+
 def prepare_video(path: Path, duration_hint: float | None = None) -> Path:
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
         raise RuntimeError("ffmpeg and ffprobe are required for video delivery.")
 
-    _, video_codec, audio_codec = _video_stream_info(path)
+    duration, video_codec, audio_codec = _video_stream_info(path)
+    duration = duration or duration_hint
     if not video_codec:
         raise RuntimeError("Downloaded media is not a real video.")
     if path.stat().st_size > MAX_DIRECT_VIDEO_BYTES:
@@ -640,25 +677,28 @@ def prepare_video(path: Path, duration_hint: float | None = None) -> Path:
 
     output = path.with_name(path.stem + "_telegram.mp4")
 
-    # Never re-encode video here. Preserve source quality bit-for-bit.
+    # Keep the video bit-for-bit. Rebuild MP4 timing/index metadata so Telegram
+    # can detect duration, seek correctly and generate a thumbnail.
+    command = [
+        "ffmpeg", "-y",
+        "-fflags", "+genpts",
+        "-i", str(path),
+        "-map", "0:v:0", "-map", "0:a:0?",
+        "-c:v", "copy",
+    ]
+
     if audio_codec in {None, "aac"}:
-        command = [
-            "ffmpeg", "-y", "-i", str(path),
-            "-map", "0:v:0", "-map", "0:a:0?",
-            "-c", "copy",
-            "-movflags", "+faststart",
-            str(output),
-        ]
+        command += ["-c:a", "copy"]
     else:
-        # Audio-only conversion is fast; the video track is still copied unchanged.
-        command = [
-            "ffmpeg", "-y", "-i", str(path),
-            "-map", "0:v:0", "-map", "0:a:0?",
-            "-c:v", "copy",
-            "-c:a", "aac", "-b:a", "128k",
-            "-movflags", "+faststart",
-            str(output),
-        ]
+        command += ["-c:a", "aac", "-b:a", "128k"]
+
+    command += [
+        "-avoid_negative_ts", "make_zero",
+        "-reset_timestamps", "1",
+        "-movflags", "+faststart",
+        "-video_track_timescale", "90000",
+        str(output),
+    ]
 
     _run_ffmpeg(command)
 
@@ -666,6 +706,20 @@ def prepare_video(path: Path, duration_hint: float | None = None) -> Path:
         raise RuntimeError("Video remux failed.")
     if output.stat().st_size > MAX_TELEGRAM_BYTES:
         raise RuntimeError("Remuxed video is still too large for Telegram.")
+
+    final_duration, final_width, final_height = _telegram_video_metadata(output)
+    logger.info(
+        "Prepared Telegram video: size=%s duration=%s width=%s height=%s codec=%s audio=%s",
+        output.stat().st_size,
+        final_duration,
+        final_width,
+        final_height,
+        video_codec,
+        audio_codec,
+    )
+    if not final_duration:
+        raise RuntimeError("Telegram MP4 has no valid duration after remux.")
+
     return output
 
 
@@ -794,11 +848,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
                 if media_type == "video":
                     path = paths[0]
+                    duration, width, height = await asyncio.to_thread(
+                        _telegram_video_metadata, path
+                    )
+                    logger.info(
+                        "Sending Telegram video: size=%s duration=%s width=%s height=%s",
+                        path.stat().st_size,
+                        duration,
+                        width,
+                        height,
+                    )
                     with path.open("rb") as file_obj:
                         await message.reply_video(
                             video=file_obj,
                             caption=caption,
                             filename="rednote_video.mp4",
+                            duration=duration,
+                            width=width,
+                            height=height,
                             supports_streaming=True,
                             read_timeout=300,
                             write_timeout=300,
