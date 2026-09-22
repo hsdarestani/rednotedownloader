@@ -46,6 +46,10 @@ jobs:
           envs: TELEGRAM_BOT_TOKEN
           command_timeout: 30m
           script: |
+            echo "===== Recent bot logs before deploy ====="
+            journalctl -u rednotedownloader --since "30 minutes ago" --no-pager -n 250 || true
+            echo "===== End recent bot logs ====="
+
             if [ ! -d /opt/rednotedownloader/.git ]; then
               git clone https://github.com/hsdarestani/rednotedownloader.git /opt/rednotedownloader
             else
@@ -54,3 +58,6 @@ jobs:
             fi
             chmod +x /opt/rednotedownloader/deploy.sh
             /opt/rednotedownloader/deploy.sh
+
+            echo "===== Bot logs after deploy ====="
+            journalctl -u rednotedownloader --since "5 minutes ago" --no-pager -n 100 || true
