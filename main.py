@@ -284,7 +284,7 @@ def _download_direct_video(candidates: list[dict], download_dir: Path, referer: 
             response = requests.get(
                 media_url,
                 headers=_request_headers(referer),
-                timeout=45,
+                timeout=(10, 20),
                 stream=True,
                 allow_redirects=True,
             )
@@ -327,9 +327,9 @@ def _ydl_options(download_dir: Path) -> dict:
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
-        "retries": 3,
-        "fragment_retries": 3,
-        "socket_timeout": 30,
+        "retries": 1,
+        "fragment_retries": 1,
+        "socket_timeout": 15,
         "http_headers": headers,
         "overwrites": True,
         "restrictfilenames": False,
@@ -537,7 +537,7 @@ def _run_ffmpeg(command: list[str]) -> None:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             check=True,
-            timeout=1800,
+            timeout=120,
         )
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError("Video conversion timed out.") from exc
@@ -600,27 +600,8 @@ def download_rednote(url: str, download_dir: Path) -> tuple[list[Path], dict, st
     except Exception as exc:
         logger.info("RedNote page analysis failed: %s", exc)
 
-    video_error = None
-    try:
-        files, info = download_video(resolved, download_dir)
-        video = files[0]
-        duration = info.get("duration") if isinstance(info, dict) else None
-        video = prepare_video(video, duration)
-        if isinstance(info, dict) and not info.get("title") and analysis.get("title"):
-            info["title"] = analysis["title"]
-        return [video], info, "video"
-    except Exception as exc:
-        video_error = exc
-        logger.info("yt-dlp RedNote video extraction failed: %s", exc)
-
-    # If the page itself says this is a video note, never fall back to cover images.
+    # Fast path: for video notes, download RedNote's own stream first.
     if analysis.get("has_video"):
-        for path in download_dir.iterdir():
-            try:
-                if path.is_file():
-                    path.unlink()
-            except OSError:
-                pass
         try:
             files, info = _download_direct_video(
                 analysis.get("video_candidates") or [],
@@ -631,12 +612,44 @@ def download_rednote(url: str, download_dir: Path) -> tuple[list[Path], dict, st
             info["title"] = analysis.get("title") or info.get("title") or ""
             return [video], info, "video"
         except Exception as direct_error:
-            raise RuntimeError(
-                f"This is a video post, but video download failed. "
-                f"yt-dlp: {video_error}. Direct: {direct_error}"
-            ) from direct_error
+            logger.info("Direct RedNote video download failed: %s", direct_error)
 
-    # Only use image fallback when the page is an image note, or type detection was impossible.
+            # Clean up before the secondary extractor.
+            for path in download_dir.iterdir():
+                try:
+                    if path.is_file():
+                        path.unlink()
+                except OSError:
+                    pass
+
+            try:
+                files, info = download_video(resolved, download_dir)
+                video = prepare_video(
+                    files[0],
+                    info.get("duration") if isinstance(info, dict) else None,
+                )
+                if isinstance(info, dict) and not info.get("title") and analysis.get("title"):
+                    info["title"] = analysis["title"]
+                return [video], info, "video"
+            except Exception as ytdlp_error:
+                raise RuntimeError(
+                    f"This is a video post, but video download failed. "
+                    f"Direct: {direct_error}. yt-dlp: {ytdlp_error}"
+                ) from ytdlp_error
+
+    # Unknown type: try yt-dlp briefly before image fallback.
+    video_error = None
+    try:
+        files, info = download_video(resolved, download_dir)
+        video = prepare_video(
+            files[0],
+            info.get("duration") if isinstance(info, dict) else None,
+        )
+        return [video], info, "video"
+    except Exception as exc:
+        video_error = exc
+        logger.info("yt-dlp RedNote video extraction failed: %s", exc)
+
     for path in download_dir.iterdir():
         try:
             if path.is_file():
@@ -695,8 +708,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     async with DOWNLOAD_SEMAPHORE:
         try:
             with tempfile.TemporaryDirectory(prefix="rednote_") as tmp:
-                paths, info, media_type = await asyncio.to_thread(
-                    download_rednote, url, Path(tmp)
+                paths, info, media_type = await asyncio.wait_for(
+                    asyncio.to_thread(download_rednote, url, Path(tmp)),
+                    timeout=110,
                 )
                 caption = clean_caption(info)
 
@@ -726,6 +740,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     await status.delete()
                 except BadRequest:
                     pass
+        except asyncio.TimeoutError:
+            logger.exception("RedNote download timed out")
+            await status.edit_text(
+                "RedNote did not respond in time. Please try the link again."
+            )
         except (TimedOut, NetworkError):
             logger.exception("Telegram network error")
             await status.edit_text("Telegram timed out while sending the file. Please try again.")
