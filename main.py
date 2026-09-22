@@ -888,6 +888,8 @@ def main() -> None:
             .base_url(f"{LOCAL_BOT_API_URL}/bot")
             .base_file_url(f"{LOCAL_BOT_API_URL}/file/bot")
             .local_mode(True)
+            .http_version("1.1")
+            .get_updates_http_version("1.1")
         )
 
     application = builder.build()
