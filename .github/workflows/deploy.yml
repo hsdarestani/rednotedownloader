@@ -1,0 +1,56 @@
+name: Deploy RedNote Downloader
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: rednote-production
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Syntax check
+        run: python -m py_compile main.py
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to server
+        uses: appleboy/ssh-action@v1
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        with:
+          host: ${{ secrets.HOST }}
+          username: root
+          password: ${{ secrets.PASS }}
+          envs: TELEGRAM_BOT_TOKEN
+          command_timeout: 30m
+          script: |
+            if [ ! -d /opt/rednotedownloader/.git ]; then
+              git clone https://github.com/hsdarestani/rednotedownloader.git /opt/rednotedownloader
+            else
+              git -C /opt/rednotedownloader fetch origin main
+              git -C /opt/rednotedownloader reset --hard origin/main
+            fi
+            chmod +x /opt/rednotedownloader/deploy.sh
+            /opt/rednotedownloader/deploy.sh
