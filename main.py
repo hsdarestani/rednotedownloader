@@ -10,10 +10,12 @@ import re
 import shutil
 import subprocess
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
 import requests
+from requests.adapters import HTTPAdapter
 import yt_dlp
 from yt_dlp.utils import js_to_json
 from bs4 import BeautifulSoup
@@ -37,12 +39,17 @@ MAX_IMAGE_BYTES = (100 * 1024 * 1024 if LOCAL_BOT_API_ENABLED else 20 * 1024 * 1
 MAX_IMAGES = 20
 DOWNLOAD_CONCURRENCY = max(1, int(os.getenv("DOWNLOAD_CONCURRENCY", "2")))
 
-ALLOWED_HOSTS = (
+REDNOTE_HOSTS = (
     "rednote.com",
     "xiaohongshu.com",
     "xhslink.com",
     "xhslink.cn",
 )
+PINTEREST_HOSTS = (
+    "pinterest.com",
+    "pin.it",
+)
+ALLOWED_HOSTS = REDNOTE_HOSTS + PINTEREST_HOSTS
 URL_RE = re.compile(r"https?://[^\s<>]+", re.IGNORECASE)
 DOWNLOAD_SEMAPHORE = asyncio.Semaphore(DOWNLOAD_CONCURRENCY)
 
@@ -51,6 +58,11 @@ USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/153.0.0.0 Safari/537.36"
 )
+
+HTTP_SESSION = requests.Session()
+HTTP_ADAPTER = HTTPAdapter(pool_connections=20, pool_maxsize=20, max_retries=0)
+HTTP_SESSION.mount("https://", HTTP_ADAPTER)
+HTTP_SESSION.mount("http://", HTTP_ADAPTER)
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
@@ -64,14 +76,23 @@ def _is_allowed_host(host: str) -> bool:
     return any(host == root or host.endswith("." + root) for root in ALLOWED_HOSTS)
 
 
-def extract_rednote_url(text: str) -> str | None:
+def _platform_for_url(url: str) -> str | None:
+    host = (urlparse(url).hostname or "").lower().split(":")[0]
+    if any(host == root or host.endswith("." + root) for root in REDNOTE_HOSTS):
+        return "rednote"
+    if any(host == root or host.endswith("." + root) for root in PINTEREST_HOSTS):
+        return "pinterest"
+    return None
+
+
+def extract_supported_url(text: str) -> str | None:
     for match in URL_RE.findall(text or ""):
         candidate = match.rstrip(").,]}>\"'")
         try:
             parsed = urlparse(candidate)
         except ValueError:
             continue
-        if parsed.scheme in {"http", "https"} and _is_allowed_host(parsed.hostname or ""):
+        if parsed.scheme in {"http", "https"} and _platform_for_url(candidate):
             return candidate
     return None
 
@@ -91,13 +112,14 @@ def _request_headers(referer: str | None = None) -> dict[str, str]:
 
 def resolve_share_url(url: str) -> str:
     host = (urlparse(url).hostname or "").lower()
-    if "xhslink." not in host:
+    needs_redirect = "xhslink." in host or host == "pin.it" or host.endswith(".pin.it")
+    if not needs_redirect:
         return url
 
-    response = requests.get(
+    response = HTTP_SESSION.get(
         url,
         headers=_request_headers(),
-        timeout=20,
+        timeout=(6, 12),
         allow_redirects=True,
     )
     response.raise_for_status()
@@ -202,7 +224,7 @@ def _walk_dicts(value):
 
 
 def _analyze_rednote_page(url: str) -> dict:
-    response = requests.get(
+    response = HTTP_SESSION.get(
         url,
         headers=_request_headers("https://www.rednote.com/"),
         timeout=30,
@@ -323,7 +345,7 @@ def _download_direct_video(candidates: list[dict], download_dir: Path, referer: 
             continue
 
         try:
-            response = requests.get(
+            response = HTTP_SESSION.get(
                 media_url,
                 headers=_request_headers(referer),
                 timeout=(8, 18),
@@ -350,7 +372,7 @@ def _download_direct_video(candidates: list[dict], download_dir: Path, referer: 
             downloaded = 0
             too_large = False
             with path.open("wb") as output:
-                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                for chunk in response.iter_content(chunk_size=4 * 1024 * 1024):
                     if not chunk:
                         continue
                     downloaded += len(chunk)
@@ -368,7 +390,14 @@ def _download_direct_video(candidates: list[dict], download_dir: Path, referer: 
                 path.unlink(missing_ok=True)
                 raise RuntimeError("Downloaded video is empty.")
 
-            _, video_codec, audio_codec = _video_stream_info(path)
+            declared_codec = str(candidate.get("video_codec") or "").lower()
+            declared_audio = str(candidate.get("audio_codec") or "").lower() or None
+            if declared_codec in {"h264", "avc", "avc1"}:
+                video_codec = "h264"
+                audio_codec = declared_audio
+            else:
+                _, video_codec, audio_codec = _video_stream_info(path)
+
             if video_codec not in {"h264", "avc1"}:
                 path.unlink(missing_ok=True)
                 errors.append(f"candidate {index} skipped: codec={video_codec}")
@@ -546,6 +575,65 @@ def _image_candidates(page_text: str) -> list[str]:
     return result
 
 
+def _save_original_image(
+    data: bytes,
+    content_type: str,
+    output_base: Path,
+) -> Path | None:
+    if not data or len(data) > MAX_IMAGE_BYTES:
+        return None
+
+    if content_type in {"image/jpeg", "image/jpg"}:
+        path = output_base.with_suffix(".jpg")
+        path.write_bytes(data)
+        return path
+    if content_type == "image/png":
+        path = output_base.with_suffix(".png")
+        path.write_bytes(data)
+        return path
+
+    try:
+        image = Image.open(io.BytesIO(data))
+        image = ImageOps.exif_transpose(image)
+        if image.mode not in ("RGB", "RGBA", "L", "LA"):
+            image = image.convert("RGBA")
+        path = output_base.with_suffix(".png")
+        image.save(path, format="PNG", optimize=False)
+        return path
+    except (UnidentifiedImageError, OSError, ValueError):
+        return None
+
+
+def _fetch_image_candidate(args: tuple[int, str, str, Path, str]):
+    index, image_url, referer, download_dir, prefix = args
+    try:
+        # Each worker uses its own short-lived connection to avoid Session
+        # contention while still downloading carousel images concurrently.
+        response = requests.get(
+            image_url,
+            headers=_request_headers(referer),
+            timeout=(6, 20),
+            allow_redirects=True,
+        )
+        response.raise_for_status()
+        content_type = (response.headers.get("Content-Type") or "").split(";")[0].lower()
+        if not content_type.startswith("image/"):
+            return None
+        data = response.content
+        digest = hashlib.sha1(data).hexdigest()
+        path = _save_original_image(
+            data,
+            content_type,
+            download_dir / f"{prefix}_{index:02d}",
+        )
+        if not path:
+            return None
+        return index, path, digest, image_url
+    except requests.RequestException:
+        logger.debug("Image candidate failed: %s", image_url, exc_info=True)
+        return None
+
+
 def download_images(
     url: str,
     download_dir: Path,
@@ -557,7 +645,7 @@ def download_images(
     candidates = _note_image_candidates(note or {})
 
     if not candidates:
-        response = requests.get(
+        response = HTTP_SESSION.get(
             url,
             headers=_request_headers("https://www.rednote.com/"),
             timeout=30,
@@ -586,68 +674,29 @@ def download_images(
     files: list[Path] = []
     hashes: set[str] = set()
 
-    for image_url in candidates:
-        if len(files) >= MAX_IMAGES:
-            break
-        try:
-            r = requests.get(
-                image_url,
-                headers=_request_headers(referer),
-                timeout=30,
-                allow_redirects=True,
-            )
-            r.raise_for_status()
+    work = [
+        (index, image_url, referer, download_dir, "rednote")
+        for index, image_url in enumerate(candidates[:MAX_IMAGES], start=1)
+    ]
+    worker_count = min(6, max(1, len(work)))
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        results = list(executor.map(_fetch_image_candidate, work))
 
-            content_type = (r.headers.get("Content-Type") or "").split(";")[0].lower()
-            if not content_type.startswith("image/"):
-                continue
-
-            data = r.content
-            if not data or len(data) > MAX_IMAGE_BYTES:
-                continue
-
-            digest = hashlib.sha1(data).hexdigest()
-            if digest in hashes:
-                continue
-            hashes.add(digest)
-
-            index = len(files) + 1
-
-            # Preserve JPEG/PNG bytes exactly. Telegram documents do not
-            # recompress them, so the user receives source quality.
-            if content_type in {"image/jpeg", "image/jpg"}:
-                path = download_dir / f"rednote_{index:02d}.jpg"
-                path.write_bytes(data)
-            elif content_type == "image/png":
-                path = download_dir / f"rednote_{index:02d}.png"
-                path.write_bytes(data)
-            else:
-                # WEBP/AVIF can be rendered sticker-like by Telegram clients.
-                # Convert to lossless PNG instead of lossy JPEG.
-                try:
-                    image = Image.open(io.BytesIO(data))
-                    image = ImageOps.exif_transpose(image)
-                    if image.mode not in ("RGB", "RGBA", "L", "LA"):
-                        image = image.convert("RGBA")
-                    path = download_dir / f"rednote_{index:02d}.png"
-                    image.save(path, format="PNG", optimize=False)
-                except (UnidentifiedImageError, OSError, ValueError):
-                    logger.debug("Original image conversion failed: %s", image_url, exc_info=True)
-                    continue
-
-            if path.exists() and 0 < path.stat().st_size <= MAX_IMAGE_BYTES:
-                files.append(path)
-                logger.info(
-                    "Downloaded original RedNote image: file=%s bytes=%s source=%s",
-                    path.name,
-                    path.stat().st_size,
-                    image_url,
-                )
-            else:
-                path.unlink(missing_ok=True)
-
-        except requests.RequestException:
-            logger.debug("Image candidate failed: %s", image_url, exc_info=True)
+    for result in results:
+        if not result:
+            continue
+        _, path, digest, image_url = result
+        if digest in hashes:
+            path.unlink(missing_ok=True)
+            continue
+        hashes.add(digest)
+        files.append(path)
+        logger.info(
+            "Downloaded original RedNote image: file=%s bytes=%s source=%s",
+            path.name,
+            path.stat().st_size,
+            image_url,
+        )
 
     if not files:
         raise RuntimeError("RedNote returned an image post, but the original images could not be downloaded.")
@@ -855,6 +904,17 @@ def download_rednote(url: str, download_dir: Path) -> tuple[list[Path], dict, st
                     f"Direct: {direct_error}. yt-dlp: {ytdlp_error}"
                 ) from ytdlp_error
 
+    # Confirmed image post: skip yt-dlp entirely. This removes a slow,
+    # unnecessary extractor round-trip for RedNote carousels.
+    if analysis.get("has_state") and _note_image_candidates(analysis.get("note") or {}):
+        files, info = download_images(
+            resolved,
+            download_dir,
+            note=analysis.get("note"),
+            page_text=analysis.get("page_text"),
+        )
+        return files, info, "images"
+
     # Unknown type: try yt-dlp briefly before image fallback.
     video_error = None
     try:
@@ -889,24 +949,140 @@ def download_rednote(url: str, download_dir: Path) -> tuple[list[Path], dict, st
         ) from image_error
 
 
+def _pinterest_ydl_options(download_dir: Path, metadata_only: bool = False) -> dict:
+    options = {
+        "outtmpl": str(download_dir / "pinterest_%(id)s.%(ext)s"),
+        "format": "best[vcodec^=avc]/best[ext=mp4]/best",
+        "merge_output_format": "mp4",
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "retries": 1,
+        "fragment_retries": 1,
+        "socket_timeout": 15,
+        "http_headers": {
+            "User-Agent": USER_AGENT,
+            "Referer": "https://www.pinterest.com/",
+        },
+        "overwrites": True,
+        "restrictfilenames": False,
+        "ignore_no_formats_error": True,
+    }
+    if metadata_only:
+        options["skip_download"] = True
+    return options
+
+
+def _pinterest_original_image_candidates(info: dict) -> list[str]:
+    thumbnails = info.get("thumbnails") or []
+    ordered = sorted(
+        [t for t in thumbnails if isinstance(t, dict) and isinstance(t.get("url"), str)],
+        key=lambda t: (int(t.get("width") or 0) * int(t.get("height") or 0)),
+        reverse=True,
+    )
+    result: list[str] = []
+    seen: set[str] = set()
+    for thumb in ordered:
+        url = thumb["url"]
+        variants = [url]
+        if "i.pinimg.com/" in url and "/originals/" not in url:
+            original = re.sub(
+                r"(https?://i\.pinimg\.com/)(?:\d+x|236x|474x|564x|736x|1200x)/",
+                r"\1originals/",
+                url,
+                count=1,
+            )
+            if original != url:
+                variants.insert(0, original)
+        for candidate in variants:
+            if candidate not in seen:
+                seen.add(candidate)
+                result.append(candidate)
+    return result
+
+
+def download_pinterest(url: str, download_dir: Path) -> tuple[list[Path], dict, str]:
+    resolved = resolve_share_url(url)
+    parsed = urlparse(resolved)
+    if "/pin/" not in parsed.path:
+        raise RuntimeError("Please send an individual Pinterest Pin link, not a board or profile.")
+
+    with yt_dlp.YoutubeDL(_pinterest_ydl_options(download_dir, metadata_only=True)) as ydl:
+        info = ydl.extract_info(resolved, download=False) or {}
+
+    info["_platform"] = "Pinterest"
+    formats = [
+        fmt for fmt in (info.get("formats") or [])
+        if isinstance(fmt, dict) and fmt.get("url")
+    ]
+
+    if formats:
+        with yt_dlp.YoutubeDL(_pinterest_ydl_options(download_dir)) as ydl:
+            downloaded_info = ydl.extract_info(resolved, download=True) or info
+        downloaded_info["_platform"] = "Pinterest"
+        files = _media_files(download_dir)
+        if not files:
+            raise RuntimeError("Pinterest returned video metadata but no video file.")
+        video = prepare_video(
+            files[0],
+            downloaded_info.get("duration") if isinstance(downloaded_info, dict) else None,
+        )
+        return [video], downloaded_info, "video"
+
+    candidates = _pinterest_original_image_candidates(info)
+    if not candidates:
+        raise RuntimeError("No downloadable Pinterest image was found.")
+
+    referer = resolved
+    work = [
+        (index, image_url, referer, download_dir, "pinterest")
+        for index, image_url in enumerate(candidates[:6], start=1)
+    ]
+    with ThreadPoolExecutor(max_workers=min(4, len(work))) as executor:
+        results = list(executor.map(_fetch_image_candidate, work))
+
+    # The candidates are quality variants of the same Pin image. Return the
+    # first successful one, with originals ordered first.
+    for result in results:
+        if result:
+            _, path, _, _ = result
+            return [path], info, "images"
+
+    raise RuntimeError("Pinterest image download failed.")
+
+
+def download_supported(url: str, download_dir: Path) -> tuple[list[Path], dict, str]:
+    platform = _platform_for_url(url)
+    if platform == "pinterest":
+        return download_pinterest(url, download_dir)
+    if platform == "rednote":
+        files, info, media_type = download_rednote(url, download_dir)
+        if isinstance(info, dict):
+            info["_platform"] = "RedNote"
+        return files, info, media_type
+    raise RuntimeError("Unsupported link.")
+
+
 def clean_caption(info: dict) -> str:
     title = ""
+    platform = "RedNote"
     if isinstance(info, dict):
         title = str(info.get("title") or "").strip()
+        platform = str(info.get("_platform") or platform)
     if not title:
-        return "Downloaded from RedNote"
+        return f"Downloaded from {platform}"
     title = re.sub(r"\s+", " ", title)
     if len(title) > 850:
         title = title[:847] + "..."
-    return f"{title}\n\nDownloaded from RedNote"
+    return f"{title}\n\nDownloaded from {platform}"
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_message:
         return
     await update.effective_message.reply_text(
-        "Send me a public RedNote link and I will download the video or images.\n\n"
-        "Supported: rednote.com, xiaohongshu.com and xhslink share links.\n"
+        "Send me a public RedNote or Pinterest link and I will download the video or images.\n\n"
+        "Supported: RedNote, Xiaohongshu, xhslink, Pinterest and pin.it links.\n"
         "Please only download content you are allowed to save."
     )
 
@@ -920,9 +1096,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not message or not message.text:
         return
 
-    url = extract_rednote_url(message.text)
+    url = extract_supported_url(message.text)
     if not url:
-        await message.reply_text("Please send a valid RedNote share link.")
+        await message.reply_text("Please send a valid RedNote or Pinterest link.")
         return
 
     status = await message.reply_text("Downloading...")
@@ -932,8 +1108,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         try:
             with tempfile.TemporaryDirectory(prefix="rednote_") as tmp:
                 paths, info, media_type = await asyncio.wait_for(
-                    asyncio.to_thread(download_rednote, url, Path(tmp)),
-                    timeout=90,
+                    asyncio.to_thread(download_supported, url, Path(tmp)),
+                    timeout=150,
                 )
                 caption = clean_caption(info)
 
@@ -989,7 +1165,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         except asyncio.TimeoutError:
             logger.exception("RedNote download timed out")
             await status.edit_text(
-                "RedNote's media servers did not return a usable video in time. Please try again."
+                "The media server did not return a usable file in time. Please try again."
             )
         except (TimedOut, NetworkError):
             logger.exception("Telegram network error")
@@ -1016,12 +1192,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 )
             elif any(word in lowered for word in ("captcha", "risk", "login")):
                 friendly = (
-                    "RedNote requires verification for this post. "
+                    "The source site requires verification for this post. "
                     "Try another public share link."
                 )
             elif "403" in lowered:
                 friendly = (
-                    "RedNote refused one of the media CDN links for this post. "
+                    "The source site refused one of the media CDN links for this post. "
                     "Please try the link again."
                 )
             else:
