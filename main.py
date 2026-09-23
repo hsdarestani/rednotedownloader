@@ -1007,46 +1007,52 @@ def download_pinterest(url: str, download_dir: Path) -> tuple[list[Path], dict, 
     if "/pin/" not in parsed.path:
         raise RuntimeError("Please send an individual Pinterest Pin link, not a board or profile.")
 
-    with yt_dlp.YoutubeDL(_pinterest_ydl_options(download_dir, metadata_only=True)) as ydl:
-        info = ydl.extract_info(resolved, download=False) or {}
+    # One extractor pass handles both detection and download. For image-only
+    # pins yt-dlp returns metadata/thumbnails without producing a video file.
+    with yt_dlp.YoutubeDL(_pinterest_ydl_options(download_dir)) as ydl:
+        info = ydl.extract_info(resolved, download=True) or {}
 
     info["_platform"] = "Pinterest"
     formats = [
         fmt for fmt in (info.get("formats") or [])
         if isinstance(fmt, dict) and fmt.get("url")
     ]
+    files = _media_files(download_dir)
 
-    if formats:
-        with yt_dlp.YoutubeDL(_pinterest_ydl_options(download_dir)) as ydl:
-            downloaded_info = ydl.extract_info(resolved, download=True) or info
-        downloaded_info["_platform"] = "Pinterest"
-        files = _media_files(download_dir)
-        if not files:
-            raise RuntimeError("Pinterest returned video metadata but no video file.")
+    if formats and files:
         video = prepare_video(
             files[0],
-            downloaded_info.get("duration") if isinstance(downloaded_info, dict) else None,
+            info.get("duration") if isinstance(info, dict) else None,
         )
-        return [video], downloaded_info, "video"
+        return [video], info, "video"
 
     candidates = _pinterest_original_image_candidates(info)
     if not candidates:
         raise RuntimeError("No downloadable Pinterest image was found.")
 
     referer = resolved
-    work = [
-        (index, image_url, referer, download_dir, "pinterest")
-        for index, image_url in enumerate(candidates[:6], start=1)
-    ]
-    with ThreadPoolExecutor(max_workers=min(4, len(work))) as executor:
-        results = list(executor.map(_fetch_image_candidate, work))
 
-    # The candidates are quality variants of the same Pin image. Return the
-    # first successful one, with originals ordered first.
-    for result in results:
-        if result:
-            _, path, _, _ = result
-            return [path], info, "images"
+    # Try the best/original image first. Usually this completes immediately
+    # and avoids waiting for lower-quality fallback URLs.
+    first = _fetch_image_candidate(
+        (1, candidates[0], referer, download_dir, "pinterest")
+    )
+    if first:
+        _, path, _, _ = first
+        return [path], info, "images"
+
+    fallback = candidates[1:6]
+    if fallback:
+        work = [
+            (index + 2, image_url, referer, download_dir, "pinterest")
+            for index, image_url in enumerate(fallback)
+        ]
+        with ThreadPoolExecutor(max_workers=min(4, len(work))) as executor:
+            results = list(executor.map(_fetch_image_candidate, work))
+        for result in results:
+            if result:
+                _, path, _, _ = result
+                return [path], info, "images"
 
     raise RuntimeError("Pinterest image download failed.")
 
@@ -1129,7 +1135,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                         await message.reply_video(
                             video=file_obj,
                             caption=caption,
-                            filename="rednote_video.mp4",
+                            filename=(
+                                "pinterest_video.mp4"
+                                if str(info.get("_platform") or "").lower() == "pinterest"
+                                else "rednote_video.mp4"
+                            ),
                             duration=duration,
                             width=width,
                             height=height,
