@@ -34,9 +34,9 @@ if [ -n "${TELEGRAM_API_ID:-}" ] && [ -n "${TELEGRAM_API_HASH:-}" ]; then
   fi
 
   docker pull aiogram/telegram-bot-api:latest >/dev/null
-  docker rm -f telegram-bot-api >/dev/null 2>&1 || true
+  docker rm -f rednote-telegram-bot-api >/dev/null 2>&1 || true
   docker run -d \
-    --name telegram-bot-api \
+    --name rednote-telegram-bot-api \
     --restart=always \
     -p 127.0.0.1:8081:8081 \
     -v /var/lib/telegram-bot-api:/var/lib/telegram-bot-api \
@@ -56,7 +56,7 @@ if [ -n "${TELEGRAM_API_ID:-}" ] && [ -n "${TELEGRAM_API_HASH:-}" ]; then
 
   if [ "$BOT_API_READY" -ne 1 ]; then
     echo "Local Telegram Bot API failed to become ready."
-    docker logs --tail 100 telegram-bot-api || true
+    docker logs --tail 100 rednote-telegram-bot-api || true
     exit 1
   fi
 
@@ -90,7 +90,7 @@ fi
 umask 077
 cat > /etc/rednotedownloader.env <<EOF
 TELEGRAM_BOT_TOKEN=$TELEGRAM_BOT_TOKEN
-DOWNLOAD_CONCURRENCY=4
+DOWNLOAD_CONCURRENCY=2
 LOG_LEVEL=INFO
 EOF
 
