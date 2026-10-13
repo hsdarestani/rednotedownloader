@@ -56,6 +56,9 @@ jobs:
           command_timeout: 30m
           script: |
             set -eu
+            # Only one application deploy may install OS packages or configure proxy at a time.
+            exec 9>/var/lock/pars-vds-bot-deploy.lock
+            flock -w 1200 9 || { echo "Timed out waiting for the shared VPS deployment lock"; exit 1; }
             case " $(hostname -I) " in
               *" 143.20.60.195 "*) echo "Pars VDS verified" ;;
               *) echo "Target is not intended Pars VDS, refusing deploy."; exit 1 ;;
