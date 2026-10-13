@@ -35,6 +35,12 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     steps:
+      - name: Validate target host
+        env:
+          DEPLOY_HOST: ${{ secrets.HOST }}
+          DEPLOY_PASS: ${{ secrets.PASS }}
+        run: |
+          test "$DEPLOY_HOST" = "143.20.60.195" && test -n "$DEPLOY_PASS"
       - name: Deploy to server
         uses: appleboy/ssh-action@v1
         env:
@@ -43,6 +49,7 @@ jobs:
           TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
         with:
           host: ${{ secrets.HOST }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
           username: root
           password: ${{ secrets.PASS }}
           envs: TELEGRAM_BOT_TOKEN,TELEGRAM_API_ID,TELEGRAM_API_HASH
@@ -50,8 +57,8 @@ jobs:
           script: |
             set -eu
             case " $(hostname -I) " in
-              *" 82.165.187.14 "*) echo "Shared Strato VPS verified" ;;
-              *) echo "Target is not intended Strato VPS, refusing deploy."; exit 1 ;;
+              *" 143.20.60.195 "*) echo "Pars VDS verified" ;;
+              *) echo "Target is not intended Pars VDS, refusing deploy."; exit 1 ;;
             esac
             if [ -z "${TELEGRAM_BOT_TOKEN:-}" ]; then
               echo "TELEGRAM_BOT_TOKEN is missing"
