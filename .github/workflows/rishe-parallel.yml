@@ -1,0 +1,61 @@
+name: Inspect Rishe parallel host
+on:
+  push:
+    branches: [infra/rishe-parallel]
+    paths: ['.github/workflows/rishe-parallel.yml']
+permissions:
+  contents: read
+concurrency:
+  group: pars-vds-rishe-parallel
+  cancel-in-progress: false
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Verify target and inspect hosting stack (no changes)
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          username: root
+          password: ${{ secrets.PASS }}
+          command_timeout: 7m
+          script: |
+            set -eu
+            test "143.20.60.195" = "$(echo '143.20.60.195')" || exit 1
+            echo "=== HOST ==="
+            hostname
+            hostname -I
+            echo "=== RESOURCES ==="
+            free -h
+            df -h / /opt 2>/dev/null || df -h /
+            echo "=== HOST SERVICES ==="
+            for svc in nginx apache2 caddy rednotedownloader; do
+              printf '%s: ' "$svc"
+              systemctl is-active "$svc" 2>/dev/null || true
+            done
+            echo "=== TCP LISTEN PORTS ==="
+            ss -ltnp | grep -E ':(80|443|8080|8094|8095|3108|3109|3000)[[:space:]]' || true
+            echo "=== FRONT PROXY NGINX SITES ==="
+            if command -v nginx >/dev/null 2>&1; then
+              nginx -T 2>/dev/null | grep -E '^\s*(server_name|listen|proxy_pass)\s' | head -100 || true
+              ls -l /etc/nginx/sites-enabled/ 2>/dev/null || true
+            fi
+            echo "=== DOCKER/COMPOSE ==="
+            if command -v docker >/dev/null 2>&1; then
+              docker --version
+              docker compose version || true
+              docker ps --format '{{.Names}} | {{.Ports}} | {{.Status}}' | head -35 || true
+            else
+              echo 'docker missing'
+            fi
+            echo "=== RISHE PREEXISTENCE ==="
+            if [ -d /opt/rishestore ]; then find /opt/rishestore -maxdepth 1 -type f -printf '%f\n'; else echo "no /opt/rishestore"; fi
+            echo "=== DNS ==="
+            for domain in rishe.store new.rishe.store; do
+              getent ahostsv4 "$domain" | head -2 || true
+            done
+            echo "=== CAPACITY ==="
+            nproc
+            echo "Inspection completed. No mutations performed."
