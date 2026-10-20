@@ -1,0 +1,51 @@
+name: Fix Rishe font volume permission
+on:
+  push:
+    branches: [infra/rishe-parallel]
+    paths: ['.github/workflows/rishe-alias-permissions.yml']
+permissions:
+  contents: read
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Expose dedicated brand volume mount to Nginx only
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          username: root
+          password: ${{ secrets.PASS }}
+          command_timeout: 6m
+          script: |
+            set -eu
+            site=/etc/nginx/sites-available/rishe.store
+            src=/var/lib/docker/volumes/rishestore_pars_brand_assets/_data
+            dst=/srv/rishe-assets
+            test -d "$src/fonts"
+            mkdir -p "$dst"
+            if ! mountpoint -q "$dst"; then mount --bind "$src" "$dst"; fi
+            if ! grep -Fq "$src $dst none bind 0 0" /etc/fstab; then
+              echo "$src $dst none bind 0 0" >> /etc/fstab
+            fi
+            cp -a "$site" "$site.before-assetmount.$(date +%s)"
+            sed -i "s#alias $src/;#alias $dst/;#" "$site"
+            grep -Fq "alias $dst/;" "$site"
+            nginx -t
+            systemctl reload nginx
+            for p in /brand/fonts/danesh.ttf /brand/fonts/daneshbd.ttf /api/health; do
+              s="$(curl -sSLk --resolve rishe.store:443:127.0.0.1 --max-time 8 -o /dev/null -w '%{http_code}' "https://rishe.store$p")"
+              echo "$p $s"
+              test "$s" = 200
+            done
+            echo 'NGINX_STATIC_FIXED'
+      - name: Verify font downloads
+        run: |
+          set -euo pipefail
+          for name in danesh.ttf daneshbd.ttf golpayegani-bold.ttf golpayegani-grunge.ttf; do
+            stat=$(curl -sSL --max-time 12 -o /tmp/font-result.bin -w '%{http_code}' "https://rishe.store/brand/fonts/$name")
+            test "$stat" = 200
+            test "$(stat -c%s /tmp/font-result.bin)" -gt 50000
+            echo "PASS $name"
+          done
