@@ -1,0 +1,44 @@
+name: Diagnose Rishe missing static assets
+on:
+  push:
+    branches: [infra/rishe-parallel]
+    paths: ['.github/workflows/rishe-assets-diagnose.yml']
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Inspect public static responses
+        run: |
+          for u in \
+            https://rishe.store/brand/fonts/danesh.ttf \
+            https://rishe.store/brand/fonts/daneshbd.ttf \
+            https://rishe.store/brand/hero.png \
+            https://rishe.store/brand/logo.png \
+            https://rishe.store/brand/products/legacy-147.jpg \
+            https://new.rishe.store/brand/fonts/danesh.ttf \
+            https://new.rishe.store/brand/hero.png \
+            https://new.rishe.store/brand/logo.png \
+            https://new.rishe.store/brand/products/legacy-147.jpg \
+            https://new.rishe.store/wp-content/uploads/2026/08/danesh.ttf; do
+              printf '%s -> ' "$u"
+              curl -L -sS -o /dev/null --max-time 20 -w 'HTTP %{http_code}, bytes %{size_download}, final %{url_effective}\n' "$u" || true
+          done
+      - name: Inspect new origin container files and remote original
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          username: root
+          password: ${{ secrets.PASS }}
+          script: |
+            set -eu
+            echo "== file inventory =="
+            docker exec rishestore_pars-app-1 sh -c 'ls -l /app/public/brand /app/public/brand/fonts /app/public/brand/products 2>&1 | head -40; find /app/public/brand -type f | wc -l'
+            echo "== volume inventory =="
+            docker volume inspect rishestore_pars_brand_assets --format '{{.Mountpoint}}'
+            echo "== stderr asset errors =="
+            docker logs --tail 100 rishestore_pars-app-1 2>&1 | grep -E 'asset fetch failed|Preparing Rishe|Starting Rishe' | head -25 || true
+            echo "== remote old domain =="
+            curl -ILsS --max-time 15 https://new.rishe.store/brand/fonts/danesh.ttf | head -16 || true
