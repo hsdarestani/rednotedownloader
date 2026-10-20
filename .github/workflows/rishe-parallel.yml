@@ -1,61 +1,58 @@
-name: Inspect Rishe parallel host
+name: Deploy Rishe parallel on Pars VDS
 on:
   push:
     branches: [infra/rishe-parallel]
-    paths: ['.github/workflows/rishe-parallel.yml']
+    paths:
+      - '.github/workflows/rishe-parallel.yml'
+      - 'rishe/**'
 permissions:
   contents: read
 concurrency:
   group: pars-vds-rishe-parallel
   cancel-in-progress: false
 jobs:
-  inspect:
+  deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 55
     steps:
-      - name: Verify target and inspect hosting stack (no changes)
-        uses: appleboy/ssh-action@v1
-        with:
-          host: ${{ secrets.HOST }}
-          port: ${{ secrets.SSH_PORT || '9011' }}
-          username: root
-          password: ${{ secrets.PASS }}
-          command_timeout: 7m
-          script: |
-            set -eu
-            test "143.20.60.195" = "$(echo '143.20.60.195')" || exit 1
-            echo "=== HOST ==="
-            hostname
-            hostname -I
-            echo "=== RESOURCES ==="
-            free -h
-            df -h / /opt 2>/dev/null || df -h /
-            echo "=== HOST SERVICES ==="
-            for svc in nginx apache2 caddy rednotedownloader; do
-              printf '%s: ' "$svc"
-              systemctl is-active "$svc" 2>/dev/null || true
-            done
-            echo "=== TCP LISTEN PORTS ==="
-            ss -ltnp | grep -E ':(80|443|8080|8094|8095|3108|3109|3000)[[:space:]]' || true
-            echo "=== FRONT PROXY NGINX SITES ==="
-            if command -v nginx >/dev/null 2>&1; then
-              nginx -T 2>/dev/null | grep -E '^\s*(server_name|listen|proxy_pass)\s' | head -100 || true
-              ls -l /etc/nginx/sites-enabled/ 2>/dev/null || true
+      - name: Checkout isolated deployment scripts
+        uses: actions/checkout@v4
+      - name: Read latest Rishe production source
+        run: |
+          git clone --depth=1 --branch main https://github.com/hsdarestani/rishestore.git source-rishe
+          echo "RISHE_SHA=$(git -C source-rishe rev-parse HEAD)" >> "$GITHUB_ENV"
+      - name: Build Rishe image on GitHub runner (not VPS)
+        run: |
+          docker build -t rishe-pars:latest source-rishe
+          docker save rishe-pars:latest | gzip -1 > rishe-image.tar.gz
+          ls -lh rishe-image.tar.gz
+      - name: Install transport
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq sshpass
+      - name: Upload release and deploy to isolated folder
+        env:
+          HOST: ${{ secrets.HOST }}
+          PASS: ${{ secrets.PASS }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+        run: |
+          set -euo pipefail
+          test "$HOST" = "143.20.60.195" || { echo "Wrong target host"; exit 1; }
+          test -n "$PASS" || { echo "Missing SSH password"; exit 1; }
+          export SSHPASS="$PASS"
+          PORT="${SSH_PORT:-9011}"
+          ARGS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=20)
+          sshpass -e ssh -p "$PORT" "${ARGS[@]}" "root@$HOST" 'install -d -m 700 /opt/rishestore-pars'
+          sshpass -e scp -P "$PORT" "${ARGS[@]}" \
+            rishe-image.tar.gz rishe/compose.yml rishe/deploy.sh "root@$HOST:/opt/rishestore-pars/"
+          sshpass -e ssh -p "$PORT" "${ARGS[@]}" "root@$HOST" 'bash /opt/rishestore-pars/deploy.sh'
+      - name: Verify root domain
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 12); do
+            if curl -fsS --max-time 10 https://rishe.store/api/health | grep -q '"ok":true'; then
+              echo "LIVE_SUCCESS: https://rishe.store/"
+              exit 0
             fi
-            echo "=== DOCKER/COMPOSE ==="
-            if command -v docker >/dev/null 2>&1; then
-              docker --version
-              docker compose version || true
-              docker ps --format '{{.Names}} | {{.Ports}} | {{.Status}}' | head -35 || true
-            else
-              echo 'docker missing'
-            fi
-            echo "=== RISHE PREEXISTENCE ==="
-            if [ -d /opt/rishestore ]; then find /opt/rishestore -maxdepth 1 -type f -printf '%f\n'; else echo "no /opt/rishestore"; fi
-            echo "=== DNS ==="
-            for domain in rishe.store new.rishe.store; do
-              getent ahostsv4 "$domain" | head -2 || true
-            done
-            echo "=== CAPACITY ==="
-            nproc
-            echo "Inspection completed. No mutations performed."
+            sleep 5
+          done
+          echo "Public health check failed"
+          exit 1
