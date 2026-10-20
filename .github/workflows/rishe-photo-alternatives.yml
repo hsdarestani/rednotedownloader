@@ -1,0 +1,30 @@
+name: Find alternative product photos in Rishe backup
+on:
+  push:
+    branches: [infra/rishe-parallel]
+    paths: ['.github/workflows/rishe-photo-alternatives.yml']
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          username: root
+          password: ${{ secrets.PASS }}
+          script: |
+            python3 - <<'PY'
+            from pathlib import Path
+            p=Path('/var/lib/docker/volumes/rishestore_pars_brand_assets/_data')
+            files=list((p/'wp-content/uploads').rglob('*'))
+            names=['nokhod','berenj','adas','chay','ghermez','lapeh','baghali','photo_5825578608645312323','IMG_20260427']
+            for key in names:
+                x=[str(f.relative_to(p/'wp-content/uploads')) for f in files if f.is_file() and key.lower() in f.name.lower()]
+                print(key,'matches',len(x),'samples',x[:6])
+            for id in ['124','210','228','251','255','256','258']:
+                x=[f.name for f in (p/'products').glob('legacy-'+id+'*') if f.is_file()]
+                print('legacy-'+id,'existing',x)
+            PY
