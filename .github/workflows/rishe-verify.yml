@@ -1,0 +1,44 @@
+name: Verify Rishe and existing Pars services
+on:
+  push:
+    branches: [infra/rishe-parallel]
+    paths: ['.github/workflows/rishe-verify.yml']
+permissions:
+  contents: read
+concurrency:
+  group: pars-vds-rishe-parallel
+  cancel-in-progress: false
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Verify public HTTPS and routes
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --max-time 15 https://rishe.store/api/health | grep -q '"ok":true'
+          for route in / /shop /packs /faq /shipping /returns /contact /login /cart /order-tracking /magazine /about /robots.txt /sitemap.xml; do
+            status=$(curl -sS -L --max-time 20 -o /dev/null -w '%{http_code}' "https://rishe.store$route")
+            echo "$status $route"
+            test "$status" = 200
+          done
+          for route in /setup /api/setup; do
+            status=$(curl -sS --max-time 15 -o /dev/null -w '%{http_code}' "https://rishe.store$route")
+            echo "$status $route (protected)"
+            test "$status" = 403
+          done
+          echo "ALL_PUBLIC_CHECKS_PASSED"
+      - name: Verify legacy services untouched
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          username: root
+          password: ${{ secrets.PASS }}
+          command_timeout: 5m
+          script: |
+            set -eu
+            systemctl is-active rednotedownloader
+            docker ps --format '{{.Names}} | {{.Status}}' | grep -E '^(rednote-telegram-bot-api|ordersvesta-bot|orderscutella-bot|rishestore_pars-app-1|rishestore_pars-db-1|rishestore_pars-worker-1)'
+            curl -fsS http://127.0.0.1:3108/api/health
+            echo "EXISTING_SERVICES_AND_RISHE_OK"
