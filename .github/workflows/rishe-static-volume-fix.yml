@@ -1,0 +1,60 @@
+name: Serve Rishe brand files from persistent volume
+on:
+  push:
+    branches: [infra/rishe-parallel]
+    paths: ['.github/workflows/rishe-static-volume-fix.yml']
+permissions:
+  contents: read
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Mount brand assets on existing Nginx site without restarting apps
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          username: root
+          password: ${{ secrets.PASS }}
+          command_timeout: 6m
+          script: |
+            set -eu
+            site=/etc/nginx/sites-available/rishe.store
+            test -f "$site"
+            grep -q 'rishe-pars-isolated' "$site"
+            cp -a "$site" "$site.before-static.$(date +%s)"
+            python3 - <<'PY'
+            from pathlib import Path
+            f = Path('/etc/nginx/sites-available/rishe.store')
+            src = f.read_text()
+            if 'location ^~ /brand/' not in src:
+                needle = '    client_max_body_size 25m;'
+                assert needle in src, 'Unknown nginx layout'
+                block = '''
+                location ^~ /brand/ {
+                    alias /var/lib/docker/volumes/rishestore_pars_brand_assets/_data/;
+                    autoindex off;
+                    add_header X-Content-Type-Options nosniff always;
+                    add_header Cache-Control "public, max-age=1800";
+                }
+                '''
+                src = src.replace(needle, needle + '\n' + block, 1)
+                f.write_text(src)
+            PY
+            nginx -t
+            systemctl reload nginx
+            test "$(curl -sS -o /dev/null -w '%{http_code}' --resolve rishe.store:443:127.0.0.1 -k https://rishe.store/brand/fonts/danesh.ttf)" = 200
+            test "$(curl -sS -o /dev/null -w '%{http_code}' --resolve rishe.store:443:127.0.0.1 -k https://rishe.store/api/health)" = 200
+            echo 'BRAND_FONT_SERVING_FIXED'
+      - name: Verify 4 fonts publicly
+        run: |
+          set -euo pipefail
+          for name in danesh.ttf daneshbd.ttf golpayegani-bold.ttf golpayegani-grunge.ttf; do
+            out="$(mktemp)"
+            status=$(curl -sSL --max-time 15 -o "$out" -w '%{http_code}' "https://rishe.store/brand/fonts/$name")
+            echo "$name HTTP $status ($(stat -c%s "$out") bytes)"
+            test "$status" = 200
+            test "$(stat -c%s "$out")" -gt 50000
+            rm -f "$out"
+          done
