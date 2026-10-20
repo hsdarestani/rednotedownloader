@@ -1,0 +1,28 @@
+name: Find archived Rishe original media
+on:
+  push:
+    branches: [infra/rishe-parallel]
+    paths: ['.github/workflows/rishe-archive-media.yml']
+permissions:
+  contents: read
+jobs:
+  find:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Query Wayback availability for original Rishe media
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json,urllib.request,urllib.parse
+          files=["2026/08/danesh.ttf","2026/08/Asset-5@300x.png","2026/06/back-1.png","2026/05/nokhod.jpg","2026/05/berenj.jpg","2026/05/chay.jpg"]
+          for f in files:
+              u="http://rishe.store/wp-content/uploads/"+f
+              endpoint="https://archive.org/wayback/available?"+urllib.parse.urlencode({"url":u,"timestamp":"202609"})
+              try:
+                  req=urllib.request.Request(endpoint,headers={"User-Agent":"RisheRestoration/1.0"})
+                  response=urllib.request.urlopen(req,timeout=15)
+                  o=json.load(response)
+                  print(f,json.dumps(o.get("archived_snapshots",{}),ensure_ascii=False))
+              except Exception as e: print(f,"UNAVAILABLE",str(e)[:150])
+          PY
