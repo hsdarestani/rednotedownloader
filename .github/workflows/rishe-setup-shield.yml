@@ -1,0 +1,42 @@
+name: Shield Rishe first-run setup
+on:
+  push:
+    branches: [infra/rishe-parallel]
+    paths: ['.github/workflows/rishe-setup-shield.yml']
+permissions:
+  contents: read
+jobs:
+  shield:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Deny public initial-admin registration on new domain
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          username: root
+          password: ${{ secrets.PASS }}
+          command_timeout: 8m
+          script: |
+            set -eu
+            for i in $(seq 1 150); do
+              if [ -f /etc/nginx/sites-available/rishe.store ] && grep -q 'rishe-pars-isolated' /etc/nginx/sites-available/rishe.store; then
+                python3 - <<'PY'
+            from pathlib import Path
+            path = Path('/etc/nginx/sites-available/rishe.store')
+            txt = path.read_text()
+            if 'location = /api/setup' not in txt:
+                marker = '    location / {'
+                assert marker in txt
+                txt = txt.replace(marker, '    location = /setup { return 403; }\n    location = /api/setup { return 403; }\n' + marker, 1)
+                path.write_text(txt)
+            PY
+                nginx -t
+                systemctl reload nginx
+                echo "First-run admin setup shield confirmed"
+                exit 0
+              fi
+              sleep 2
+            done
+            echo "No managed Rishe site found; nothing modified"
