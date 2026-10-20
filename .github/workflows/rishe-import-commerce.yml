@@ -1,0 +1,47 @@
+name: Import Rishe WooCommerce customers and orders
+on:
+  push:
+    branches: [infra/rishe-parallel]
+    paths: ['.github/workflows/rishe-import-commerce.yml']
+permissions:
+  contents: read
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Migrate with rollback snapshot and private server logs
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          username: root
+          password: ${{ secrets.PASS }}
+          command_timeout: 40m
+          script: |
+            set -eu
+            exec 9>/var/lock/pars-vds-bot-deploy.lock
+            flock -w 300 9
+            d=/opt/rishestore-pars/legacy-20261020
+            test -s "$d/pg-before-legacy-20261020.dump"
+            test -s "$d/rishesto_compatible.sql"
+            cd /opt/rishestore-pars
+            docker compose -f compose.yml -p rishestore_pars exec -T db pg_isready -U rishe -d rishe
+            docker cp "$d/rishesto_compatible.sql" rishestore_pars-app-1:/tmp/rishe-legacy-import.sql
+            trap 'docker exec rishestore_pars-app-1 rm -f /tmp/rishe-legacy-import.sql >/dev/null 2>&1 || true' EXIT
+            log="$d/import-20261020.private.log"
+            umask 077
+            echo 'MIGRATION_STARTED'
+            if docker exec rishestore_pars-app-1 sh -c 'cd /app && npx --no-install tsx scripts/import-legacy-commerce.ts /tmp/rishe-legacy-import.sql' > "$log" 2>&1; then
+              grep '^LEGACY_IMPORT_RESULT=' "$log" || true
+              echo 'MIGRATION_TASK_SUCCEEDED'
+            else
+              echo 'MIGRATION_TASK_FAILED_PRIVATE_DETAILS_ON_SERVER'
+              grep -oE 'P[0-9]{4}|LEGACY_[A-Z_]+' "$log" | sort -u | head -15 || true
+              exit 1
+            fi
+            echo '=== DATABASE COUNTS ==='
+            for table in User Customer Order OrderItem EventSale EventSaleLine; do
+              docker exec rishestore_pars-db-1 psql -U rishe -d rishe -Atc "select '$table', count(*) from \"$table\";"
+            done
+            curl -fsS -m 12 http://127.0.0.1:3108/api/health
