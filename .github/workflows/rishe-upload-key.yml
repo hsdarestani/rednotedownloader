@@ -1,0 +1,29 @@
+name: Activate Rishe upload key
+on:
+  push:
+    branches: [infra/rishe-parallel]
+    paths: ['.github/workflows/rishe-upload-key.yml']
+permissions:
+  contents: read
+jobs:
+  activate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Add WinSCP public key
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          username: root
+          password: ${{ secrets.PASS }}
+          script: |
+            set -eu
+            test "$(id -un 1000)" = risheupload
+            key='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPsIEUkvsFONR5w1uBcztKYayoIECa/r77rENPuDvzU6 eddsa-key-20261020'
+            f=/etc/ssh/authorized_keys/risheupload
+            test -f "$f"
+            if ! grep -Fqx "$key" "$f"; then printf '%s\n' "$key" >> "$f"; fi
+            chmod 600 "$f"
+            ssh-keygen -lf "$f"
+            sshd -t
+            echo RISHE_UPLOAD_KEY_REGISTERED
