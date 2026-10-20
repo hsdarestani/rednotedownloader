@@ -1,0 +1,32 @@
+name: Diagnose Rishe brand Nginx routing
+on:
+  push:
+    branches: [infra/rishe-parallel]
+    paths: ['.github/workflows/rishe-nginx-diagnose.yml']
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Read-only server check
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          username: root
+          password: ${{ secrets.PASS }}
+          script: |
+            set -eu
+            echo "== site file =="
+            sed -n '1,130p' /etc/nginx/sites-available/rishe.store
+            echo "== assets and access perms =="
+            ls -ld /var/lib/docker /var/lib/docker/volumes /var/lib/docker/volumes/rishestore_pars_brand_assets /var/lib/docker/volumes/rishestore_pars_brand_assets/_data /var/lib/docker/volumes/rishestore_pars_brand_assets/_data/fonts
+            ls -l /var/lib/docker/volumes/rishestore_pars_brand_assets/_data/fonts | head -12
+            echo "== local responses =="
+            for path in /brand/fonts/danesh.ttf /api/health; do
+              curl -skSL --resolve rishe.store:443:127.0.0.1 --max-time 5 -o /dev/null -w "$path %{http_code} %{size_download}\n" "https://rishe.store$path" || true
+              curl -sSL --max-time 5 -o /dev/null -w "public $path %{http_code} %{size_download}\n" "https://rishe.store$path" || true
+            done
+            echo "== recent nginx errors =="
+            tail -50 /var/log/nginx/error.log || true
