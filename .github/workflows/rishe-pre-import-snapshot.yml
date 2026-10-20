@@ -1,0 +1,36 @@
+name: Snapshot Rishe database before migration
+on:
+  push:
+    branches: [infra/rishe-parallel]
+    paths: ['.github/workflows/rishe-pre-import-snapshot.yml']
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          username: root
+          password: ${{ secrets.PASS }}
+          command_timeout: 8m
+          script: |
+            set -eu
+            cd /opt/rishestore-pars
+            d=/opt/rishestore-pars/legacy-20261020
+            test -s "$d/rishesto_compatible.sql"
+            chmod 700 "$d"
+            echo '=== Preserve full current PostgreSQL database ==='
+            docker compose -f compose.yml -p rishestore_pars exec -T db pg_dump -U rishe -d rishe -Fc > "$d/pg-before-legacy-20261020.dump"
+            chmod 600 "$d/pg-before-legacy-20261020.dump"
+            test -s "$d/pg-before-legacy-20261020.dump"
+            docker exec -i rishestore_pars-db-1 pg_restore -l < "$d/pg-before-legacy-20261020.dump" > /dev/null
+            stat -c 'POSTGRES_BACKUP_BYTES=%s' "$d/pg-before-legacy-20261020.dump"
+            echo '=== Counts before import ==='
+            for tab in User Customer Order EventSale; do
+              docker exec rishestore_pars-db-1 psql -U rishe -d rishe -Atc "select '$tab',count(*) from \"$tab\";"
+            done
+            echo 'PG_BACKUP_VERIFIED'
