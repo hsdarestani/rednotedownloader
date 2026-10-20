@@ -1,0 +1,46 @@
+name: Repair remaining Rishe product photo routes
+on:
+  push:
+    branches: [infra/rishe-parallel]
+    paths: ['.github/workflows/rishe-photo-fallback.yml']
+permissions:
+  contents: read
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          username: root
+          password: ${{ secrets.PASS }}
+          script: |
+            set -eu
+            base=/var/lib/docker/volumes/rishestore_pars_brand_assets/_data
+            original="$base/wp-content/uploads/2026/05/photo_5825578608645312323_y-600x800.jpg"
+            if [ -s "$original" ] && [ ! -s "$base/products/legacy-124.jpg" ]; then
+              cp "$original" "$base/products/legacy-124.jpg"
+              chmod 644 "$base/products/legacy-124.jpg"
+            fi
+            site=/etc/nginx/sites-available/rishe.store
+            cp -a "$site" "$site.before-product-photo-fallback.$(date +%s)"
+            python3 - <<'PY'
+            from pathlib import Path
+            p=Path('/etc/nginx/sites-available/rishe.store')
+            s=p.read_text()
+            assert 'rishe-pars-isolated' in s and 'location ^~ /brand/' in s
+            ids=('210','228','251','255','256','258')
+            routes=''.join('    location = /brand/products/legacy-'+i+'.jpg { return 302 /brand/products/legacy-'+i+'-story.png; }\n' for i in ids)
+            if 'location = /brand/products/legacy-210.jpg' not in s:
+                s=s.replace('    client_max_body_size 25m;', '    client_max_body_size 25m;\n'+routes, 1)
+            p.write_text(s)
+            PY
+            nginx -t
+            systemctl reload nginx
+            for id in 124 210 228 251 255 256 258; do
+              status=$(curl -sSL -o /dev/null -w '%{http_code}' --max-time 10 "https://rishe.store/brand/products/legacy-$id.jpg")
+              echo "product $id final HTTP $status"
+              test "$status" = 200
+            done
+            echo PRODUCT_PHOTO_ROUTES_READY
