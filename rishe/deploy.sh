@@ -84,6 +84,9 @@ server {
     listen [::]:80;
     server_name rishe.store;
     client_max_body_size 25m;
+    # Never permit public first-run admin takeover before protected migration/setup.
+    location = /setup { return 403; }
+    location = /api/setup { return 403; }
     location / {
         proxy_pass http://127.0.0.1:3108;
         proxy_http_version 1.1;
