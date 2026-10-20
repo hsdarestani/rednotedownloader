@@ -1,11 +1,14 @@
-name: Check Rishe backup upload
+name: Inspect Rishe backup archive
 on:
   push:
     branches: [infra/rishe-parallel]
     paths: ['.github/workflows/rishe-verify-upload.yml']
+permissions:
+  contents: read
 jobs:
-  check:
+  inspect:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: appleboy/ssh-action@v1
         with:
@@ -13,22 +16,21 @@ jobs:
           port: ${{ secrets.SSH_PORT || '9011' }}
           username: root
           password: ${{ secrets.PASS }}
+          command_timeout: 16m
           script: |
             set -eu
             file=/srv/rishe-sftp/incoming/backup-Oct-20-2026-1.tar.gz
             test -s "$file"
-            echo '=== archive size ==='
+            echo '=== ARCHIVE SIZE ==='
             du -h "$file"
-            echo '=== listing archive ==='
+            echo '=== VERIFY AND INDEX ARCHIVE ==='
             tar -tzf "$file" > /tmp/rishe_backup_filelist_20261020.txt
-            echo '=== top archive paths ==='
+            echo '=== ROOT PATHS ==='
             head -15 /tmp/rishe_backup_filelist_20261020.txt
-            echo '=== database candidates ==='
-            grep -Ei '\\.sql(\\.gz)?$|database\\.gz
- /tmp/rishe_backup_filelist_20261020.txt | head -20 || true
-            echo '=== wordpress media path samples ==='
-            grep -Ei 'wp-content/uploads/|/uploads/2026/' /tmp/rishe_backup_filelist_20261020.txt | head -15 || true
-            echo '=== archive file count ==='
+            echo '=== DATABASE FILES ==='
+            grep -Ei '\.sql(\.gz)?$' /tmp/rishe_backup_filelist_20261020.txt | head -15 || true
+            echo '=== WORDPRESS MEDIA ==='
+            grep -Ei 'wp-content/uploads/|/uploads/2026/' /tmp/rishe_backup_filelist_20261020.txt | head -12 || true
+            echo '=== COUNT ==='
             wc -l /tmp/rishe_backup_filelist_20261020.txt
-            echo '=== server storage ==='
             df -h /
