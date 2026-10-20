@@ -1,0 +1,69 @@
+name: Create restricted Rishe SFTP inbox
+on:
+  push:
+    branches: [infra/rishe-parallel]
+    paths: ['.github/workflows/rishe-sftp-inbox.yml']
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Create SFTP-only account on existing RedNote VPS
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          username: root
+          password: ${{ secrets.PASS }}
+          command_timeout: 6m
+          script: |
+            set -euo pipefail
+            echo "== Verify known host identity =="
+            case " $(hostname -I) " in
+              *" 143.20.60.195 "*) echo "Intended host verified";;
+              *) echo "Host mismatch - refusing"; exit 1;;
+            esac
+            echo "== Create isolated upload area (not web-accessible) =="
+            install -d -m 0755 -o root -g root /srv/rishe-sftp
+            if ! id -u risheupload >/dev/null 2>&1; then
+              useradd --no-create-home -d /incoming -s /usr/sbin/nologin risheupload
+            fi
+            install -d -m 0750 -o risheupload -g risheupload /srv/rishe-sftp/incoming
+            install -d -m 0700 -o root -g root /etc/ssh/authorized_keys
+            touch /etc/ssh/authorized_keys/risheupload
+            chown root:root /etc/ssh/authorized_keys/risheupload
+            chmod 0600 /etc/ssh/authorized_keys/risheupload
+            echo "== Add restricted SSH match rule, key-only =="
+            if ! grep -q '^# RISHE-SFTP-ONLY-20261020$' /etc/ssh/sshd_config; then
+              cp -a /etc/ssh/sshd_config /etc/ssh/sshd_config.rishe-pre-sftp
+              cat >> /etc/ssh/sshd_config <<'RULE'
+            
+            # RISHE-SFTP-ONLY-20261020
+            Match User risheupload
+                ChrootDirectory /srv/rishe-sftp
+                ForceCommand internal-sftp -d /incoming -u 077
+                AuthorizedKeysFile /etc/ssh/authorized_keys/%u
+                PubkeyAuthentication yes
+                PasswordAuthentication no
+                KbdInteractiveAuthentication no
+                AllowTcpForwarding no
+                PermitTunnel no
+                X11Forwarding no
+                PermitTTY no
+            RULE
+            fi
+            if ! sshd -t; then
+              cp -a /etc/ssh/sshd_config.rishe-pre-sftp /etc/ssh/sshd_config
+              sshd -t
+              echo "SFTP block rolled back due to invalid SSH config"
+              exit 1
+            fi
+            systemctl reload ssh || systemctl reload sshd
+            echo "== Final readiness =="
+            df -h /srv/rishe-sftp
+            id risheupload
+            stat -c '%a %U %G %n' /srv/rishe-sftp /srv/rishe-sftp/incoming
+            systemctl is-active rednotedownloader
+            echo "RISHE_SFTP_INBOX_READY_REQUIRES_PUBLIC_KEY"
