@@ -1,0 +1,23 @@
+name: Inspect Pars VPS storage after Rishe recovery
+on:
+  push:
+    branches: [infra/rishe-parallel]
+    paths: ['.github/workflows/rishe-storage-inspect.yml']
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          username: root
+          password: ${{ secrets.PASS }}
+          script: |
+            df -h /
+            docker system df
+            du -sh /opt/rishestore-pars /srv/rishe-sftp/incoming /srv/rishe-assets /var/lib/docker /var/log 2>/dev/null || true
+            echo '=== Rishe images ==='
+            docker image ls --format '{{.Repository}} {{.Tag}} {{.ID}} {{.Size}}' | grep -E 'rishe|<none>' | head -25 || true
