@@ -2,7 +2,7 @@ name: Check Rishe backup upload
 on:
   push:
     branches: [infra/rishe-parallel]
-    paths: ['rishe/recovery-status-20261020.md']
+    paths: ['.github/workflows/rishe-verify-upload.yml']
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -14,4 +14,21 @@ jobs:
           username: root
           password: ${{ secrets.PASS }}
           script: |
-            ls -lh /srv/rishe-sftp/incoming/
+            set -eu
+            file=/srv/rishe-sftp/incoming/backup-Oct-20-2026-1.tar.gz
+            test -s "$file"
+            echo '=== archive size ==='
+            du -h "$file"
+            echo '=== listing archive ==='
+            tar -tzf "$file" > /tmp/rishe_backup_filelist_20261020.txt
+            echo '=== top archive paths ==='
+            head -15 /tmp/rishe_backup_filelist_20261020.txt
+            echo '=== database candidates ==='
+            grep -Ei '\\.sql(\\.gz)?$|database\\.gz
+ /tmp/rishe_backup_filelist_20261020.txt | head -20 || true
+            echo '=== wordpress media path samples ==='
+            grep -Ei 'wp-content/uploads/|/uploads/2026/' /tmp/rishe_backup_filelist_20261020.txt | head -15 || true
+            echo '=== archive file count ==='
+            wc -l /tmp/rishe_backup_filelist_20261020.txt
+            echo '=== server storage ==='
+            df -h /
