@@ -1,0 +1,33 @@
+name: Analyze Rishe SQL export format
+on:
+  push:
+    branches: [infra/rishe-parallel]
+    paths: ['.github/workflows/rishe-sql-preflight.yml']
+permissions:
+  contents: read
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          username: root
+          password: ${{ secrets.PASS }}
+          script: |
+            set -eu
+            python3 - <<'PY'
+            import pathlib,re
+            s=pathlib.Path('/opt/rishestore-pars/legacy-20261020/rishesto_db.sql').read_text(errors='replace')
+            print("SQL_LENGTH", len(s))
+            names=['wp_users','wp_usermeta','wp_wc_customer_lookup','wp_wc_orders','wp_wc_order_addresses','wp_wc_order_operational_data','wp_woocommerce_order_items','wp_woocommerce_order_itemmeta','wp_rishe_sales_events','wp_rishe_event_sales','wp_rishe_event_sale_lines']
+            for t in names:
+                matches=list(re.finditer(r'INSERT INTO\s+`?'+re.escape(t)+r'`?\s*([^;]{0,350}?)VALUES',s,re.I|re.S))
+                prefix=matches[0].group(1) if matches else ''
+                fmt='column_list' if prefix.lstrip().startswith('(') else ('values_only' if matches else 'no_insert')
+                print(t, 'insert_statements='+str(len(matches)), 'format='+fmt)
+            PY
+            echo '=== Current isolated DB tables ==='
+            cd /opt/rishestore-pars
+            docker compose -f compose.yml -p rishestore_pars ps
