@@ -1,0 +1,60 @@
+name: rishestore_pars
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: rishe
+      POSTGRES_USER: rishe
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rishe -d rishe"]
+      interval: 5s
+      timeout: 4s
+      retries: 25
+  app:
+    image: rishe-pars:latest
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:3108:3000"
+    environment:
+      DATABASE_URL: postgresql://rishe:${POSTGRES_PASSWORD}@db:5432/rishe?schema=public
+      APP_SECRET: ${APP_SECRET}
+      NEXT_PUBLIC_SITE_URL: https://rishe.store
+      ZIBAL_MERCHANT: ${ZIBAL_MERCHANT:-}
+      ZIBAL_CALLBACK_BASE_URL: https://rishe.store
+      BALE_BOT_TOKEN: ${BALE_BOT_TOKEN:-}
+      BALE_ADMIN_CHAT_ID: ${BALE_ADMIN_CHAT_ID:-}
+      BALE_WEBHOOK_SECRET: ${BALE_WEBHOOK_SECRET:-}
+      TAX_SUBMIT_ENDPOINT: ${TAX_SUBMIT_ENDPOINT:-}
+      TAX_API_TOKEN: ${TAX_API_TOKEN:-}
+      SMSIR_API: ${SMSIR_API:-}
+    volumes:
+      - uploads:/app/public/uploads
+      - brand_assets:/app/public/brand
+      - backups:/backups
+      - ./.legacy-migration-private.pem:/run/secrets/legacy-migration-private.pem:ro
+  worker:
+    image: rishe-pars:latest
+    restart: unless-stopped
+    command: ["node", "/app/scripts/worker.mjs"]
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://rishe:${POSTGRES_PASSWORD}@db:5432/rishe?schema=public
+      APP_SECRET: ${APP_SECRET}
+      TAX_SUBMIT_ENDPOINT: ${TAX_SUBMIT_ENDPOINT:-}
+      TAX_API_TOKEN: ${TAX_API_TOKEN:-}
+    volumes:
+      - backups:/backups
+volumes:
+  pgdata:
+  uploads:
+  brand_assets:
+  backups:
