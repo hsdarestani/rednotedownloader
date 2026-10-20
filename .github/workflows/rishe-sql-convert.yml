@@ -1,0 +1,22 @@
+name: Prepare Rishe WooCommerce SQL import
+on:
+  push:
+    branches: [infra/rishe-parallel]
+    paths: ['.github/workflows/rishe-sql-convert.yml']
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          username: root
+          password: ${{ secrets.PASS }}
+          script: |
+            set -eu
+            curl -fsSL --max-time 40 'https://raw.githubusercontent.com/hsdarestani/rednotedownloader/812e545a2b359291f06adebbb3177c570dc9d8f6/tools/rishe-sql-prepare-20261020.py' -o /tmp/rishe-prepare-sql.py
+            python3 /tmp/rishe-prepare-sql.py
