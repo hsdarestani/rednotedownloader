@@ -1,0 +1,55 @@
+name: Final verification Rishe restored store
+on:
+  push:
+    branches: [infra/rishe-parallel]
+    paths: ['.github/workflows/rishe-recovery-final-qa.yml']
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Verify public HTTPS and certificate
+        run: |
+          set -eu
+          for page in / /shop /packs /about /contact /api/health /brand/logo.png /brand/hero.png /brand/fonts/danesh.ttf; do
+            code=$(curl -sSL --max-time 20 -o /dev/null -w '%{http_code}' "https://rishe.store$page")
+            echo "$page HTTP $code"
+            test "$code" = 200
+          done
+      - name: Verify imported data and all 15 public product images
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          username: root
+          password: ${{ secrets.PASS }}
+          script: |
+            set -eu
+            cd /opt/rishestore-pars
+            echo '=== Imported database counts ==='
+            for table in User Customer Order OrderItem EventSale EventSaleLine; do
+              docker exec rishestore_pars-db-1 psql -U rishe -d rishe -Atc "select '$table',count(*) from \"$table\";"
+            done
+            test "$(docker exec rishestore_pars-db-1 psql -U rishe -d rishe -Atc 'select count(*) from "Order"')" = 220
+            test "$(docker exec rishestore_pars-db-1 psql -U rishe -d rishe -Atc 'select count(*) from "Customer"')" = 239
+            test "$(docker exec rishestore_pars-db-1 psql -U rishe -d rishe -Atc 'select count(*) from "EventSale"')" = 156
+            echo '=== Product images ==='
+            for e in 113.jpg 124.jpg 139.jpg 147.jpg 210.jpg 228.jpg 249.png 251.jpg 255.jpg 256.jpg 258.jpg 421.jpg 422.png 423.png 424.png; do
+              s=$(curl -ksSL --max-time 12 --resolve rishe.store:443:127.0.0.1 -o /dev/null -w '%{http_code}' "https://rishe.store/brand/products/legacy-$e")
+              echo "legacy-$e HTTP $s"
+              test "$s" = 200
+            done
+            echo '=== Admin safety ==='
+            test "$(curl -ks --resolve rishe.store:443:127.0.0.1 -o /dev/null -w '%{http_code}' https://rishe.store/setup)" = 403
+            echo '=== Other service health ==='
+            systemctl is-active rednotedownloader
+            docker ps --format '{{.Names}}' | grep -Fx rednote-telegram-bot-api
+            docker ps --format '{{.Names}}' | grep -Fx ordersvesta-bot
+            docker ps --format '{{.Names}}' | grep -Fx orderscutella-bot
+            echo '=== Operational integration state ==='
+            if grep -qE '^SMSIR_API=.+$' /opt/rishestore-pars/.env; then echo 'SMSIR_CONFIGURED=yes'; else echo 'SMSIR_CONFIGURED=no'; fi
+            if grep -qE '^ZIBAL_MERCHANT=.+$' /opt/rishestore-pars/.env; then echo 'ZIBAL_CONFIGURED=yes'; else echo 'ZIBAL_CONFIGURED=no'; fi
+            df -h /
+            echo 'FINAL_RISHE_RECOVERY_QA_PASSED'
