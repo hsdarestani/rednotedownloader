@@ -69,6 +69,16 @@ if [ "$ready" -ne 1 ]; then
   exit 1
 fi
 
+echo "== Ensure persistent brand media mount ==" 
+media_source=/var/lib/docker/volumes/rishestore_pars_brand_assets/_data
+media_mount=/srv/rishe-assets
+test -d "$media_source"
+mkdir -p "$media_mount"
+if ! mountpoint -q "$media_mount"; then mount --bind "$media_source" "$media_mount"; fi
+if ! grep -Fq "$media_source $media_mount none bind 0 0" /etc/fstab; then
+  echo "$media_source $media_mount none bind 0 0" >> /etc/fstab
+fi
+
 echo "== Installing only the rishe.store Nginx vhost =="
 site=/etc/nginx/sites-available/rishe.store
 link=/etc/nginx/sites-enabled/rishe.store
@@ -87,6 +97,24 @@ server {
     # Never permit public first-run admin takeover before protected migration/setup.
     location = /setup { return 403; }
     location = /api/setup { return 403; }
+    location ^~ /brand/ {
+        alias /srv/rishe-assets/;
+        autoindex off;
+        add_header X-Content-Type-Options nosniff always;
+        add_header Cache-Control "public, max-age=1800";
+    }
+    location ^~ /wp-content/uploads/ {
+        alias /srv/rishe-assets/wp-content/uploads/;
+        autoindex off;
+        add_header X-Content-Type-Options nosniff always;
+        add_header Cache-Control "public, max-age=1800";
+    }
+    location = /brand/products/legacy-210.jpg { return 302 /brand/products/legacy-210-story.png; }
+    location = /brand/products/legacy-228.jpg { return 302 /brand/products/legacy-228-story.png; }
+    location = /brand/products/legacy-251.jpg { return 302 /brand/products/legacy-251-story.png; }
+    location = /brand/products/legacy-255.jpg { return 302 /brand/products/legacy-255-story.png; }
+    location = /brand/products/legacy-256.jpg { return 302 /brand/products/legacy-256-story.png; }
+    location = /brand/products/legacy-258.jpg { return 302 /brand/products/legacy-258-story.png; }
     location / {
         proxy_pass http://127.0.0.1:3108;
         proxy_http_version 1.1;
