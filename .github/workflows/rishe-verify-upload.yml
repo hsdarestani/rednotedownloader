@@ -1,0 +1,17 @@
+name: Check Rishe backup upload
+on:
+  push:
+    branches: [infra/rishe-parallel]
+    paths: ['rishe/recovery-status-20261020.md']
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          username: root
+          password: ${{ secrets.PASS }}
+          script: |
+            ls -lh /srv/rishe-sftp/incoming/
