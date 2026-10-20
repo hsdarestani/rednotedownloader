@@ -1,0 +1,24 @@
+name: Diagnose Rishe recovery volume
+on:
+  push:
+    branches: [infra/rishe-parallel]
+    paths: ['.github/workflows/rishe-debug-stage.yml']
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          username: root
+          password: ${{ secrets.PASS }}
+          script: |
+            echo '=== EXISTING VOLUMES ==='
+            docker volume ls --format '{{.Name}}' | grep rishe || true
+            echo '=== VOLUME PATH ==='
+            docker volume inspect rishestore_pars_brand_assets --format '{{.Mountpoint}}' || true
+            echo '=== DIRS ==='
+            ls -ld /var/lib/docker/volumes/rishestore_pars_brand_assets/_data /srv/rishe-assets /srv/rishe-sftp/incoming || true
+            echo '=== SCRIPT PATH SETTING ==='
+            grep -n 'MEDIA_BASE\|parent.parent' /tmp/rishe-stage-backup-20261020.py || true
