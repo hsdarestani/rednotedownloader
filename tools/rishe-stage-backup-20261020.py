@@ -10,7 +10,7 @@ import tempfile
 
 ARCHIVE_FILE = Path("/srv/rishe-sftp/incoming/backup-Oct-20-2026-1.tar.gz")
 SQL_FILE = Path("/opt/rishestore-pars/legacy-20261020/rishesto_db.sql")
-MEDIA_BASE = Path("/srv/rishe-assets/wp-content/uploads")
+MEDIA_BASE = Path("/var/lib/docker/volumes/rishestore_pars_brand_assets/_data/wp-content/uploads")
 SOURCE_PREFIX = "domains/rishe.store/public_html/wp-content/uploads/"
 ALLOWED = {".jpg", ".jpeg", ".png", ".webp", ".avif", ".gif", ".svg", ".ico", ".ttf", ".otf", ".woff", ".woff2"}
 MAX_ASSET_SIZE = 64 * 1024 * 1024
