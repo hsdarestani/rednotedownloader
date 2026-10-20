@@ -1,0 +1,64 @@
+name: Restore Rishe original images and fonts
+on:
+  push:
+    branches: [infra/rishe-parallel]
+    paths: ['.github/workflows/rishe-publish-media.yml']
+permissions:
+  contents: read
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          username: root
+          password: ${{ secrets.PASS }}
+          command_timeout: 8m
+          script: |
+            set -eu
+            curl -fLsS --max-time 30 'https://raw.githubusercontent.com/hsdarestani/rednotedownloader/783f4460abf382037c6a46db9b7de6b5dafeb378/tools/rishe-map-assets-20261020.py' -o /tmp/rishe-map-assets.py
+            python3 /tmp/rishe-map-assets.py
+            src=/var/lib/docker/volumes/rishestore_pars_brand_assets/_data
+            dst=/srv/rishe-assets
+            mkdir -p "$dst"
+            if ! mountpoint -q "$dst"; then mount --bind "$src" "$dst"; fi
+            site=/etc/nginx/sites-available/rishe.store
+            cp -a "$site" "$site.before-media.$(date +%s)"
+            python3 - <<'PY'
+            from pathlib import Path
+            f=Path('/etc/nginx/sites-available/rishe.store')
+            s=f.read_text()
+            assert 'rishe-pars-isolated' in s
+            block='''
+                location ^~ /brand/ {
+                    alias /srv/rishe-assets/;
+                    autoindex off;
+                    add_header X-Content-Type-Options nosniff always;
+                    add_header Cache-Control "public, max-age=1800";
+                }
+                location ^~ /wp-content/uploads/ {
+                    alias /srv/rishe-assets/wp-content/uploads/;
+                    autoindex off;
+                    add_header X-Content-Type-Options nosniff always;
+                    add_header Cache-Control "public, max-age=1800";
+                }
+            '''
+            import re
+            s=re.sub(r'    location \^~ /brand/ \{[^{}]*\}', '', s, count=1)
+            if 'location ^~ /wp-content/uploads/' not in s:
+                s=s.replace('    client_max_body_size 25m;', '    client_max_body_size 25m;\n'+block, 1)
+            else:
+                s=s.replace('    client_max_body_size 25m;', '    client_max_body_size 25m;\n'+block.split('    location ^~ /wp-content/uploads/')[0], 1)
+            f.write_text(s)
+            PY
+            nginx -t
+            systemctl reload nginx
+            for p in /brand/logo.png /brand/hero.png /brand/fonts/danesh.ttf /brand/fonts/daneshbd.ttf /brand/products/legacy-124.jpg; do
+              s=$(curl -ksSL --resolve rishe.store:443:127.0.0.1 -o /dev/null -w '%{http_code}' "https://rishe.store$p")
+              echo "$p HTTP $s"
+              test "$s" = 200
+            done
+            echo 'RESTORED_ORIGINAL_MEDIA_SUCCESS'
