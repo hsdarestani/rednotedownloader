@@ -20,7 +20,7 @@ jobs:
           command_timeout: 20m
           script: |
             set -eu
-            curl -fLSs --retry 3 --max-time 70 'https://raw.githubusercontent.com/hsdarestani/rednotedownloader/infra/rishe-parallel/tools/rishe-stage-backup-20261020.py' -o /tmp/rishe-stage-backup-20261020.py
+            curl -fLSs --retry 3 --max-time 70 'https://raw.githubusercontent.com/hsdarestani/rednotedownloader/e5f85943d39e32e00e2e445ec6e4fefca557443d/tools/rishe-stage-backup-20261020.py' -o /tmp/rishe-stage-backup-20261020.py
             python3 /tmp/rishe-stage-backup-20261020.py
             echo '=== REQUIRED DATABASE TABLES ==='
             for t in wp_users wp_wc_orders wp_wc_order_addresses wp_woocommerce_order_items wp_woocommerce_order_itemmeta wp_wc_customer_lookup; do
