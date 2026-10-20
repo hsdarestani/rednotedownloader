@@ -1,0 +1,62 @@
+name: Recover local Persian fonts for Rishe
+on:
+  push:
+    branches: [infra/rishe-parallel]
+    paths: ['.github/workflows/rishe-font-fallback.yml']
+permissions:
+  contents: read
+jobs:
+  fonts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Download verified OFL fallback fonts
+        run: |
+          set -euo pipefail
+          mkdir -p fonts
+          for weight in Regular Bold Black; do
+            curl -fLsS --retry 3 --max-time 30 \
+              "https://cdn.jsdelivr.net/npm/vazirmatn@33.0.3/fonts/ttf/Vazirmatn-${weight}.ttf" \
+              -o "fonts/Vazirmatn-${weight}.ttf"
+            test "$(stat -c%s "fonts/Vazirmatn-${weight}.ttf")" -gt 50000
+          done
+          cp fonts/Vazirmatn-Regular.ttf fonts/danesh.ttf
+          cp fonts/Vazirmatn-Bold.ttf fonts/daneshbd.ttf
+          cp fonts/Vazirmatn-Bold.ttf fonts/golpayegani-bold.ttf
+          cp fonts/Vazirmatn-Black.ttf fonts/golpayegani-grunge.ttf
+      - name: Upload and install only missing fonts
+        env:
+          HOST: ${{ secrets.HOST }}
+          SSHPASS: ${{ secrets.PASS }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+        run: |
+          set -euo pipefail
+          test "$HOST" = "143.20.60.195"
+          export SSHPASS
+          PORT="${SSH_PORT:-9011}"
+          opts=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
+          sshpass -e ssh -p "$PORT" "${opts[@]}" root@"$HOST" 'mkdir -p /opt/rishestore-pars/font-recovery'
+          sshpass -e scp -P "$PORT" "${opts[@]}" fonts/danesh.ttf fonts/daneshbd.ttf fonts/golpayegani-bold.ttf fonts/golpayegani-grunge.ttf root@"$HOST":/opt/rishestore-pars/font-recovery/
+          sshpass -e ssh -p "$PORT" "${opts[@]}" root@"$HOST" 'bash -s' <<'REMOTE'
+          set -eu
+          target=/var/lib/docker/volumes/rishestore_pars_brand_assets/_data/fonts
+          test -d "$target"
+          for name in danesh.ttf daneshbd.ttf golpayegani-bold.ttf golpayegani-grunge.ttf; do
+            if [ ! -s "$target/$name" ]; then
+              cp "/opt/rishestore-pars/font-recovery/$name" "$target/$name"
+              chmod 644 "$target/$name"
+              echo "Installed local open-license interim font: $name"
+            else
+              echo "Existing original font preserved: $name"
+            fi
+          done
+          REMOTE
+      - name: Verify local fonts return 200
+        run: |
+          set -euo pipefail
+          for name in danesh.ttf daneshbd.ttf golpayegani-bold.ttf golpayegani-grunge.ttf; do
+            s=$(curl -sS -L --max-time 15 -o /tmp/font.bin -w '%{http_code}' "https://rishe.store/brand/fonts/$name")
+            test "$s" = 200
+            test "$(stat -c%s /tmp/font.bin)" -gt 50000
+            echo "$name: HTTP 200"
+          done
