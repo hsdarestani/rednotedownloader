@@ -1,0 +1,28 @@
+name: Inspect Rishe restored media paths
+on:
+  push:
+    branches: [infra/rishe-parallel]
+    paths: ['.github/workflows/rishe-media-inspect.yml']
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          username: root
+          password: ${{ secrets.PASS }}
+          script: |
+            echo '=== site locations ==='
+            grep -nE 'server_name|location|alias|listen|proxy_pass' /etc/nginx/sites-available/rishe.store
+            echo '=== mounts ==='
+            mountpoint /srv/rishe-assets || true
+            echo '=== file metadata ==='
+            stat -c '%s %a %n' /srv/rishe-assets/logo.png /var/lib/docker/volumes/rishestore_pars_brand_assets/_data/logo.png || true
+            echo '=== local responses ==='
+            for p in /brand/logo.png /brand/hero.png /wp-content/uploads/2026/08/Asset-5@300x.png /api/health; do
+              curl -sk --resolve rishe.store:443:127.0.0.1 -o /dev/null -w "%{http_code} %{size_download} $p\n" "https://rishe.store$p"
+            done
+            echo '=== recent errors ==='
+            tail -12 /var/log/nginx/error.log || true
