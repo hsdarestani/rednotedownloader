@@ -36,7 +36,7 @@ def main():
         raise FileNotFoundError("Uploaded archive not found")
     SQL_FILE.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(SQL_FILE.parent, 0o700)
-    if not MEDIA_BASE.parent.is_dir():
+    if not MEDIA_BASE.parent.parent.is_dir():
         raise ValueError("Expected existing bind-mounted brand asset folder")
     MEDIA_BASE.mkdir(parents=True, exist_ok=True, mode=0o755)
     assets = 0
