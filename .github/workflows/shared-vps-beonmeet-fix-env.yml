@@ -1,0 +1,69 @@
+name: Urgently repair BeOnMeet dotenv and controller
+on:
+  push:
+    branches: [ops/shared-vps-inventory-20261022]
+    paths: [.github/workflows/shared-vps-beonmeet-fix-env.yml]
+permissions:
+  contents: read
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check host
+        env:
+          H: ${{ secrets.HOST }}
+        run: test "$H" = "143.20.60.195"
+      - name: Repair dotenv serialization and restart controller
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          username: root
+          password: ${{ secrets.PASS }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          command_timeout: 4m
+          script: |
+            set -euo pipefail
+            case " $(hostname -I) " in *" 143.20.60.195 "*) : ;; *) exit 1 ;; esac
+            python3 - <<'PY'
+            from pathlib import Path
+            import os
+            p=Path('/opt/beonmeet/.env')
+            s=p.read_text()
+            if chr(92)+'n' in s:
+                # The only malformed form has all 20 env fields serialized into one line.
+                if len(s.splitlines())!=1:
+                    raise SystemExit('Unexpected mixed env encoding: will not alter')
+                s=s.replace(chr(92)+'n',chr(10))
+            rows=[line for line in s.splitlines() if '=' in line]
+            keys={row.split('=',1)[0] for row in rows}
+            needed={'BEONMEET_STAGING_NO_POLL','BEONMEET_DATA_DIR','INTERNAL_SECRET','GOOGLE_CLIENT_ID','GOOGLE_CLIENT_SECRET','TELEGRAM_BOT_TOKEN'}
+            assert needed.issubset(keys), 'Expected configuration keys missing'
+            assert len(rows)>15, 'Invalid repaired env'
+            tmp=p.with_name('.env.repaired.tmp')
+            tmp.write_text(s if s.endswith(chr(10)) else s+chr(10))
+            os.chmod(tmp,0o600)
+            tmp.replace(p)
+            print('BeOnMeet dotenv repaired:',len(rows),'settings (no values printed)')
+            PY
+            systemctl reset-failed beonmeet-controller || true
+            systemctl restart beonmeet-controller
+            READY=0
+            for n in $(seq 1 40); do
+              if curl -fsS --max-time 5 http://127.0.0.1:8109/health >/tmp/beonmeet-controller-fixed.json 2>/dev/null; then READY=1; break; fi
+              sleep 3
+            done
+            if [ "$READY" -ne 1 ]; then
+              journalctl -u beonmeet-controller -n 15 --no-pager || true
+              exit 1
+            fi
+            python3 - <<'PY'
+            import json
+            x=json.load(open('/tmp/beonmeet-controller-fixed.json'))
+            assert x['ok'] is True
+            assert x['max_concurrent_meetings'] == 0
+            print('BEONMEET_CONTROLLER_REPAIRED_AND_HEALTHY')
+            PY
+            systemctl is-active --quiet rednotedownloader
+            systemctl is-active --quiet hamoon-dashboard
+            curl -fsS http://127.0.0.1:8106/health >/dev/null
+            curl -fsS http://127.0.0.1:8117/health >/dev/null
