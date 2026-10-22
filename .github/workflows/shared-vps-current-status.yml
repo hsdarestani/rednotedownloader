@@ -31,5 +31,14 @@ jobs:
               printf 'probe %s: ' "$url"
               curl --max-time 3 -sS -o /dev/null -w '%{http_code}\n' "$url" || true
             done
+            echo 'TLS certificates available (public metadata only)'
+            find /etc/letsencrypt/live -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null || true
+            for f in /etc/letsencrypt/live/*/fullchain.pem; do
+              test -r "$f" || continue
+              echo "$f"
+              openssl x509 -in "$f" -noout -ext subjectAltName 2>/dev/null | tail -3 || true
+            done
+            echo 'Configured nginx https names'
+            grep -Rh 'server_name' /etc/nginx/sites-enabled 2>/dev/null | head -25 || true
             systemctl is-active rednotedownloader
             nginx -t
