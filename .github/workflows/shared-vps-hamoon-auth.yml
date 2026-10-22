@@ -1,0 +1,36 @@
+name: Allow dedicated non-root Hamoon source staging key
+on:
+  push:
+    branches: [ops/shared-vps-inventory-20261022]
+    paths: [.github/workflows/shared-vps-hamoon-auth.yml]
+permissions:
+  contents: read
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate host
+        env:
+          H: ${{ secrets.HOST }}
+        run: test "$H" = "143.20.60.195"
+      - name: Set up non-root SSH deploy account with public key
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          username: root
+          password: ${{ secrets.PASS }}
+          command_timeout: 3m
+          script: |
+            set -euo pipefail
+            case " $(hostname -I) " in *" 143.20.60.195 "*) : ;; *) exit 1 ;; esac
+            if ! id hamoondeploy >/dev/null 2>&1; then useradd -m -s /bin/bash hamoondeploy; fi
+            install -o hamoondeploy -g hamoondeploy -m 0700 -d /home/hamoondeploy/.ssh
+            cat > /home/hamoondeploy/.ssh/authorized_keys <<'EOF'
+            ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBjANC6yVzm41KosMtsftArmDM3MoKodJH4Nxt6IXRFM hamoon-rescue-recovery-20260718-224538
+            EOF
+            chown hamoondeploy:hamoondeploy /home/hamoondeploy/.ssh/authorized_keys
+            chmod 600 /home/hamoondeploy/.ssh/authorized_keys
+            install -d -m 0700 -o hamoondeploy -g hamoondeploy /home/hamoondeploy/hamoon-source
+            echo 'Dedicated Hamoon deployment account prepared, no sudo permissions granted.'
+            systemctl is-active --quiet rednotedownloader
