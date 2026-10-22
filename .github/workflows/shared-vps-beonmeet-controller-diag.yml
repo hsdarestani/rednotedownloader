@@ -41,6 +41,6 @@ jobs:
             docker inspect beonmeet-worker-single --format '{{.State.Status}} {{.State.Restarting}} {{.State.OOMKilled}}' || true
             docker ps --filter name=beonmeet --format '{{.Names}} {{.Status}}'
             echo 'Recent worker logs (sanitize any token-containing URL before printing)'
-            docker logs --tail=20 beonmeet-worker-single 2>&1 | sed -E 's/bot[0-9]+:[A-Za-z0-9_-]+/bot[REDACTED]/g' | tail -20 || true
+            docker logs --tail=100 beonmeet-worker-single 2>&1 | sed -E 's/bot[0-9]+:[A-Za-z0-9_-]+/bot[REDACTED]/g' | tail -20 || true
             df -h /
             free -h
