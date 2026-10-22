@@ -1,0 +1,74 @@
+name: Build a light BeOnMeet worker against the existing Chrome container
+on:
+  push:
+    branches: [ops/shared-vps-inventory-20261022]
+    paths: [.github/workflows/shared-vps-beonmeet-worker-build.yml]
+permissions:
+  contents: read
+concurrency:
+  group: pars-vps-staging
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Guard destination
+        env:
+          H: ${{ secrets.HOST }}
+        run: test "$H" = "143.20.60.195"
+      - name: Build minimized recorder worker image, separate from Chrome
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          username: root
+          password: ${{ secrets.PASS }}
+          command_timeout: 25m
+          script: |
+            set -euo pipefail
+            exec 9>/var/lock/pars-vds-bot-deploy.lock
+            flock -w 300 9
+            case " $(hostname -I) " in *" 143.20.60.195 "*) : ;; *) exit 1 ;; esac
+            cd /opt/beonmeet/upstream
+            test "$(git rev-parse HEAD)" = 1447ed3a38ce052a694872141a9b7085189e8513
+            test "$(df -Pk / | awk 'NR==2 {print $4}')" -gt 4000000
+            test "$(docker inspect -f '{{.State.Running}}' beonmeet-chrome-single)" = true
+            cat >Dockerfile.shared-vps <<'EOF'
+            FROM node:20-bookworm-slim
+            ENV DEBIAN_FRONTEND=noninteractive
+            RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg pulseaudio pulseaudio-utils xvfb ca-certificates curl dumb-init \
+                && rm -rf /var/lib/apt/lists/*
+            WORKDIR /usr/src/app
+            COPY package.json package-lock.json ./
+            ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 PUPPETEER_SKIP_DOWNLOAD=1
+            RUN npm ci --no-audit --no-fund && npm cache clean --force
+            COPY . .
+            RUN chmod +x /usr/src/app/xvfb-run-wrapper && NODE_OPTIONS=--max-old-space-size=1300 npm run build
+            RUN groupadd -g 1001 nodejs && useradd -m -d /home/nodejs -u 1001 -g nodejs nodejs \
+                && mkdir -p /run/user/1001 /usr/src/app/dist/_tempvideo && chown -R nodejs:nodejs /run/user/1001 /usr/src/app/dist/_tempvideo /home/nodejs \
+                && chmod 700 /run/user/1001 && chmod 1777 /tmp
+            ENV NODE_ENV=production XDG_RUNTIME_DIR=/run/user/1001
+            USER nodejs
+            EXPOSE 3000
+            ENTRYPOINT ["/usr/bin/dumb-init","--","/usr/src/app/xvfb-run-wrapper"]
+            CMD ["node","dist/index.js"]
+            EOF
+            echo "Starting single-image worker build; already installed Chrome remains separate"
+            if ! timeout 1200 docker build --progress=plain --file Dockerfile.shared-vps --tag beonmeet-worker-shared:latest .; then
+              echo 'Worker build failed; clean Docker build cache only'
+              docker builder prune --force --all || true
+              df -h /
+              exit 1
+            fi
+            docker builder prune --force --all || true
+            test "$(df -Pk / | awk 'NR==2 {print $4}')" -gt 1500000
+            echo "Recorder worker image:"
+            docker image inspect beonmeet-worker-shared:latest --format '{{.Id}} {{.Size}}'
+            systemctl is-active --quiet rednotedownloader
+            systemctl is-active --quiet hamoon-dashboard
+            systemctl is-active --quiet beonmeet-controller
+            curl -fsS --max-time 5 http://127.0.0.1:8117/health >/dev/null
+            curl -fsS --max-time 5 http://127.0.0.1:8106/health >/dev/null
+            echo "Remaining disk:"
+            df -h /
+            echo 'BEONMEET_WORKER_IMAGE_BUILT_NO_BROWSER_DUPLICATION'
