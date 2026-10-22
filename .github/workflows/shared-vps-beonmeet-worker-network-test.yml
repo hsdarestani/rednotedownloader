@@ -1,0 +1,44 @@
+name: Verify BeOnMeet controller connectivity from worker before activation
+on:
+  push:
+    branches: [ops/shared-vps-inventory-20261022]
+    paths: [.github/workflows/shared-vps-beonmeet-worker-network-test.yml]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify host
+        env:
+          H: ${{ secrets.HOST }}
+        run: test "$H" = "143.20.60.195"
+      - name: Read-only bridge and worker integration test
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          username: root
+          password: ${{ secrets.PASS }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          command_timeout: 3m
+          script: |
+            set -eu
+            BRIDGE="$(docker network inspect -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' beonmeet-single)"
+            echo "Controller local:"
+            curl -fsS --max-time 4 http://127.0.0.1:8109/health | head -c 130; echo
+            echo "Controller via private bridge:"
+            curl -sS --max-time 5 -o /dev/null -w 'host bridge status: %{http_code}\n' "http://$BRIDGE:8119/health" || true
+            docker exec beonmeet-worker-single sh -c "curl -sS --max-time 5 -o /dev/null -w 'worker to host controller: %{http_code}\n' http://$BRIDGE:8119/health" || true
+            echo "Worker and Chrome:"
+            curl -sS --max-time 5 -o /dev/null -w 'worker health: %{http_code}\n' http://127.0.0.1:9124/health || true
+            curl -sS --max-time 5 -o /dev/null -w 'chrome health: %{http_code}\n' http://127.0.0.1:9123/json/version || true
+            echo 'bridge service'
+            systemctl is-active beonmeet-docker-bridge || true
+            echo 'current docker interfaces'
+            ip route get "$BRIDGE" || true
+            echo 'INPUT firewall rules for docker networks'
+            iptables -S INPUT | head -30 || true
+            echo 'host services'
+            systemctl is-active beonmeet-controller
+            systemctl is-active hamoon-dashboard
+            systemctl is-active rednotedownloader
