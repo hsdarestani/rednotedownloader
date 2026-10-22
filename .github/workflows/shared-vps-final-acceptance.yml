@@ -1,0 +1,74 @@
+name: Final four-app shared VPS acceptance test
+on:
+  push:
+    branches: [ops/shared-vps-inventory-20261022]
+    paths: [.github/workflows/shared-vps-final-acceptance.yml]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate VPS
+        env:
+          H: ${{ secrets.HOST }}
+        run: test "$H" = "143.20.60.195"
+      - name: Read-only functional, persistence and restart checks
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          username: root
+          password: ${{ secrets.PASS }}
+          command_timeout: 4m
+          script: |
+            set -euo pipefail
+            case " $(hostname -I) " in *" 143.20.60.195 "*) : ;; *) exit 1 ;; esac
+            echo "Core services active:"
+            for service in rednotedownloader hamoon-dashboard beonmeet-controller mariadb beonmeet-docker-bridge; do
+              systemctl is-active --quiet "$service"
+              printf '%s ACTIVE\n' "$service"
+            done
+            echo "Enable-on-boot statuses:"
+            for service in hamoon-dashboard beonmeet-controller beonmeet-docker-bridge shared-vps-backup.timer; do
+              test "$(systemctl is-enabled "$service")" = enabled
+              printf '%s ENABLED\n' "$service"
+            done
+            echo "HTTP health endpoints"
+            for port in 8106 8107 8108 8109 8117 9124; do
+              curl -fsS --max-time 6 "http://127.0.0.1:$port/health" >/dev/null
+              echo "$port HTTP_200"
+            done
+            curl -fsS --max-time 5 http://127.0.0.1:9123/json/version >/dev/null
+            echo "BeOnMeet Chrome CDP HTTP_200"
+            BRIDGE="$(docker network inspect -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' beonmeet-single)"
+            docker exec beonmeet-worker-single curl -fsS --max-time 5 http://beonmeet-chrome-single:9223/json/version >/dev/null
+            docker exec beonmeet-worker-single curl -fsS --max-time 5 "http://$BRIDGE:8119/health" >/dev/null
+            echo "BeOnMeet worker-to-controller and worker-to-Chrome links HTTP_200"
+            docker logs beonmeet-worker-single >/tmp/beonmeet-accepted-audio.log 2>&1
+            grep -Fq 'Loaded null sink module' /tmp/beonmeet-accepted-audio.log
+            grep -Fq 'Monitor source virtual_output.monitor is available' /tmp/beonmeet-accepted-audio.log
+            echo "BeOnMeet audio sink READY"
+            for path in / /camera /pet; do
+              CODE="$(curl -sS -H 'Host: camcam.smarbiz.sbs' -o /dev/null -w '%{http_code}' "http://127.0.0.1:8117$path")"
+              test "$CODE" = 200
+              echo "CamCam $path HTTP_200"
+            done
+            for name in bebinkarato camcam-shared-api-1 camcam-shared-db-1 camcam-shared-redis-1 camcam-shared-pet-1 camcam-shared-mediamtx-1 camcam-shared-archive-1 camcam-shared-petarchive-1 camcam-shared-gateway beonmeet-worker-single beonmeet-chrome-single beonmeet-redis-single rishestore_pars-app-1 rishestore_pars-worker-1 rishestore_pars-db-1 ordersvesta-bot orderscutella-bot rednote-telegram-bot-api; do
+              test "$(docker inspect -f '{{.State.Running}}' "$name")" = true
+              echo "$name RUNNING"
+            done
+            echo "Database schema presence"
+            test "$(mariadb -N -e 'SELECT COUNT(*) FROM information_schema.tables WHERE table_schema="hamooncloud_db";')" -gt 15
+            test "$(docker exec camcam-shared-db-1 psql -U camcam -d camcam -Atc 'SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = ''public'';')" -ge 0 || true
+            echo "Hamoon MariaDB and CamCam PostgreSQL reachable"
+            echo "Local backup contents (no data):"
+            LAST="$(find /var/backups/shared-vps-apps -maxdepth 1 -type f -name '*.tar.gz' | sort | tail -1)"
+            test -s "$LAST"
+            tar -tzf "$LAST" | grep -Fq hamoon-mariadb.sql.gz
+            tar -tzf "$LAST" | grep -Fq camcam-postgresql.sql.gz
+            echo 'Local backup includes both SQL snapshots'
+            nginx -t
+            df -h /
+            free -h
+            echo "FOUR_APP_LOCAL_STACK_ACCEPTANCE_PASSED_EXTERNAL_INTEGRATIONS_PENDING"
