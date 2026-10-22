@@ -1,0 +1,88 @@
+name: Start one constrained BeOnMeet Chromium recorder browser
+on:
+  push:
+    branches: [ops/shared-vps-inventory-20261022]
+    paths: [.github/workflows/shared-vps-beonmeet-chrome-runtime.yml]
+permissions:
+  contents: read
+concurrency:
+  group: pars-vps-staging
+  cancel-in-progress: false
+jobs:
+  chrome:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify deployment target
+        env:
+          HOST_EXPECTED: ${{ secrets.HOST }}
+        run: test "$HOST_EXPECTED" = "143.20.60.195"
+      - name: Launch one local-only Chrome instance with resource limits
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          username: root
+          password: ${{ secrets.PASS }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          command_timeout: 7m
+          script: |
+            set -euo pipefail
+            exec 9>/var/lock/pars-vds-bot-deploy.lock
+            flock -w 300 9
+            case " $(hostname -I) " in *" 143.20.60.195 "*) : ;; *) echo 'HOST_MISMATCH'; exit 1 ;; esac
+            systemctl is-active --quiet rednotedownloader
+            systemctl is-active --quiet hamoon-dashboard
+            systemctl is-active --quiet beonmeet-controller
+            test "$(df -Pk / | awk 'NR==2 {print $4}')" -gt 3000000
+            docker image inspect beonmeet-chrome-cdp:latest >/dev/null
+            mkdir -p /opt/beonmeet/chrome-profile
+            chown -R 1001:1001 /opt/beonmeet/chrome-profile
+            chmod 700 /opt/beonmeet/chrome-profile
+            docker network inspect beonmeet-single >/dev/null 2>&1 || docker network create --internal=false beonmeet-single >/dev/null
+            if ! docker inspect beonmeet-chrome-single >/dev/null 2>&1; then
+              docker run -d --name beonmeet-chrome-single \
+                --restart unless-stopped \
+                --network beonmeet-single \
+                --cpus=0.70 --memory=880m --memory-swap=1300m --pids-limit=230 --shm-size=256m \
+                --security-opt no-new-privileges \
+                -e CHROME_WINDOW_SIZE=1280,720 \
+                -e CHROME_URL=https://accounts.google.com/ \
+                -p 127.0.0.1:9123:9223 -p 127.0.0.1:6081:6080 \
+                -v /opt/beonmeet/chrome-profile:/tmp/chrome-profile \
+                beonmeet-chrome-cdp:latest >/dev/null
+            else
+              docker start beonmeet-chrome-single >/dev/null || true
+            fi
+            READY=0
+            for i in $(seq 1 45); do
+              if curl -fsS --max-time 3 http://127.0.0.1:9123/json/version >/tmp/beonmeet-cdp-health.json 2>/dev/null \
+                && curl -fsS --max-time 3 http://127.0.0.1:6081/ >/dev/null 2>&1; then READY=1; break; fi
+              sleep 3
+            done
+            if [ "$READY" -ne 1 ]; then
+              echo 'Chrome CDP or noVNC failed: stop only new Chrome container'
+              docker logs --tail=70 beonmeet-chrome-single || true
+              docker stop beonmeet-chrome-single >/dev/null || true
+              exit 1
+            fi
+            python3 - <<'PY'
+            import json
+            d=json.load(open('/tmp/beonmeet-cdp-health.json'))
+            assert 'Browser' in d and 'webSocketDebuggerUrl' in d
+            print('BEONMEET_CDP_OK:',d['Browser'].split('/')[0])
+            PY
+            MEM="$(awk '/MemAvailable:/ {print $2}' /proc/meminfo)"
+            DISK="$(df -Pk / | awk 'NR==2 {print $4}')"
+            echo "MEM_AVAILABLE_KIB=$MEM DISK_AVAILABLE_KIB=$DISK"
+            if [ "$MEM" -lt 160000 ] || [ "$DISK" -lt 1500000 ]; then
+              echo 'Chrome stopped because safety reserve was breached'
+              docker stop beonmeet-chrome-single >/dev/null || true
+              exit 1
+            fi
+            test "$(docker inspect -f '{{.State.Running}}' beonmeet-chrome-single)" = true
+            systemctl is-active --quiet rednotedownloader
+            systemctl is-active --quiet hamoon-dashboard
+            systemctl is-active --quiet beonmeet-controller
+            for port in 8106 8117 8108 8109; do curl -fsS --max-time 5 "http://127.0.0.1:$port/health" >/dev/null; done
+            nginx -t
+            echo "Chrome recorder browser and login UI are running on loopback: CDP 9123, noVNC 6081. No recording-bot worker or Google account authenticated yet."
+            echo 'BEONMEET_SINGLE_CHROME_STARTED'
