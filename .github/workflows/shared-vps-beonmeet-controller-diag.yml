@@ -1,0 +1,41 @@
+name: Diagnose BeOnMeet controller startup after worker join
+on:
+  push:
+    branches: [ops/shared-vps-inventory-20261022]
+    paths: [.github/workflows/shared-vps-beonmeet-controller-diag.yml]
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check target
+        env:
+          TARGET: ${{ secrets.HOST }}
+        run: test "$TARGET" = "143.20.60.195"
+      - name: Read-only controller service and file formatting
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          username: root
+          password: ${{ secrets.PASS }}
+          command_timeout: 2m
+          script: |
+            set -eu
+            systemctl status beonmeet-controller --no-pager -l | tail -20 || true
+            journalctl -u beonmeet-controller -n 50 --no-pager | tail -50 || true
+            python3 - <<'PY'
+            from pathlib import Path
+            import os
+            p=Path('/opt/beonmeet/.env')
+            data=p.read_text()
+            print('Env file number of lines:', len(data.splitlines()), 'literal escape count:', data.count('\\n'))
+            print('Non-sensitive setting keys:', [line.split('=',1)[0] for line in data.splitlines() if '=' in line])
+            PY
+            for port in 8109 9124 9125; do
+              printf 'port %s: ' "$port"
+              curl -sS --max-time 3 -o /dev/null -w '%{http_code}\n' "http://127.0.0.1:$port/health" || true
+            done
+            df -h /
+            free -h
