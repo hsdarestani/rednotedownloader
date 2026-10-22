@@ -1,0 +1,58 @@
+name: Shared VPS capacity inventory (read-only)
+on:
+  push:
+    branches:
+      - ops/shared-vps-inventory-20261022
+    paths:
+      - .github/workflows/shared-vps-inventory.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inventory:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Confirm configured destination
+        env:
+          DEPLOY_HOST: ${{ secrets.HOST }}
+          DEPLOY_PASS: ${{ secrets.PASS }}
+        run: |
+          test "$DEPLOY_HOST" = "143.20.60.195"
+          test -n "$DEPLOY_PASS"
+          echo "Destination matches RedNote production configuration."
+      - name: Inspect host without changes
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          username: root
+          password: ${{ secrets.PASS }}
+          command_timeout: 3m
+          script: |
+            set -eu
+            case " $(hostname -I) " in
+              *" 143.20.60.195 "*) echo "Target identity: confirmed" ;;
+              *) echo "Target does not have expected IP"; exit 1 ;;
+            esac
+            echo "## OS"
+            sed -n '1,6p' /etc/os-release
+            echo "## CPU, memory, disk"
+            nproc
+            free -h
+            df -h / /var/lib/docker 2>/dev/null || df -h /
+            echo "## Systemd service status (names only)"
+            for s in rednotedownloader nginx caddy docker; do systemctl is-active "$s" 2>/dev/null || true; done
+            echo "## Listening TCP/UDP ports"
+            ss -ltun | head -100 || true
+            echo "## Docker containers and published ports"
+            if command -v docker >/dev/null; then
+              docker ps -a --format '{{.Names}} | {{.Status}} | {{.Ports}}' || true
+              docker compose ls --format json 2>/dev/null || true
+              docker system df 2>/dev/null || true
+            else echo "Docker not installed"; fi
+            echo "## Known application directories"
+            for d in /opt/rednotedownloader /opt/beonmeet /opt/camcam /opt/bebinkarato /opt/hamooncloud /opt/hamoon-private /root/apluscard; do
+              if test -d "$d"; then echo "$d exists"; else echo "$d absent"; fi
+            done
+            echo "## RedNote active check"
+            systemctl is-active rednotedownloader || true
