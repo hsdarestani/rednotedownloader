@@ -1,0 +1,115 @@
+name: Stage lightweight apps on shared VPS (no DNS / no bot polling)
+on:
+  push:
+    branches:
+      - ops/shared-vps-inventory-20261022
+    paths:
+      - .github/workflows/shared-vps-stage.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: pars-vps-staging
+  cancel-in-progress: false
+jobs:
+  staging:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ensure intended server
+        env:
+          HOST_CHECK: ${{ secrets.HOST }}
+        run: |
+          test "$HOST_CHECK" = "143.20.60.195"
+      - name: Stage apps safely
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          username: root
+          password: ${{ secrets.PASS }}
+          command_timeout: 20m
+          script: |
+            set -euo pipefail
+            exec 9>/var/lock/pars-vds-bot-deploy.lock
+            flock -w 300 9
+            case " $(hostname -I) " in
+              *" 143.20.60.195 "*) : ;;
+              *) echo "Wrong host"; exit 1 ;;
+            esac
+            systemctl is-active --quiet rednotedownloader
+            command -v git
+            command -v docker
+            docker compose version
+            DISK_KB="$(df -Pk / | awk 'NR==2 {print $4}')"
+            if [ "$DISK_KB" -lt 1250000 ]; then
+              echo "Not enough headroom for even isolated staging ($DISK_KB KB free)"
+              exit 1
+            fi
+
+            # Public repos only. Private Hamoon production is not cloned with unsafe credentials.
+            # Existing directories are intentionally not reset or overwritten.
+            mkdir -p /opt/shared-vps-staging
+            for ITEM in 'beonmeet beonmeet' 'cacmcam camcam'; do
+              set -- $ITEM
+              SRC="$1"; DEST="$2"
+              if [ ! -e "/opt/$DEST" ]; then
+                git clone --depth=1 "https://github.com/hsdarestani/$SRC.git" "/opt/$DEST"
+              fi
+              git -C "/opt/$DEST" rev-parse --short HEAD
+            done
+
+            if [ ! -d /opt/bebinkarato/app ]; then
+              mkdir -p /opt/bebinkarato
+              git clone --depth=1 https://github.com/hsdarestani/bebinkarato.git /opt/bebinkarato/app
+            fi
+            cd /opt/bebinkarato/app
+
+            # Never overwrite a pre-existing runtime or DB.
+            mkdir -p data
+            chmod 700 data
+            if [ ! -f .env ]; then
+              umask 077
+              PASS_NEW="$(openssl rand -hex 24)"
+              cat > .env <<EOF
+            TELEGRAM_BOT_TOKEN=
+            CLOUDFLARE_API_TOKEN=
+            CLOUDFLARE_ACCOUNT_ID=
+            ADMIN_USERNAME=admin
+            ADMIN_PASSWORD=${PASS_NEW}
+            DATABASE_URL=sqlite:////data/bebinkarato.db
+            DEFAULT_TIMEZONE=Asia/Tehran
+            FREE_AI_REQUESTS=60
+            FREE_VOICE_MINUTES=20
+            EOF
+              chmod 600 .env
+            fi
+            cat > docker-compose.shared-vps.yml <<'EOF'
+            services:
+              app:
+                ports:
+                  - "127.0.0.1:8106:8000"
+            EOF
+
+            echo "Building/starting only the BebinKarato app (NO Caddy, no ports 80/443)."
+            docker compose -f docker-compose.yml -f docker-compose.shared-vps.yml -p bebinkarato-shared up -d --build app
+            for _ in $(seq 1 35); do
+              if curl -fsS --max-time 3 http://127.0.0.1:8106/health >/tmp/bebinkarato-staging-health.json; then break; fi
+              sleep 3
+            done
+            echo "BebinKarato local health:"
+            cat /tmp/bebinkarato-staging-health.json
+            echo
+            python3 - <<'PY'
+            import json
+            d=json.load(open('/tmp/bebinkarato-staging-health.json'))
+            assert d.get("ok") is True
+            assert d.get("telegram_configured") is False, "Must not start duplicate Telegram polling"
+            assert d.get("admin_configured") is True
+            PY
+            systemctl is-active --quiet rednotedownloader
+            nginx -t
+            echo "Service states:"
+            docker ps --format '{{.Names}} {{.Status}} {{.Ports}}'
+            echo "Disk after staging:"
+            df -h /
+            echo "STAGING_SUCCESS: isolated BebinKarato API, CamCam/BeOnMeet code only. No DNS change, no Telegram bot cutover."
