@@ -47,3 +47,8 @@ RedNote systemd active, Rishestore, Orders Vesta, Orders Cutella containers stil
 - `beonmeet.smarbiz.sbs`: update A origin only if meeting recorder genuinely transferred.
 - `pay.hamooncloud.ir`: update A origin only if Hamoon payment callback and production DB genuinely transferred.
 - `bebinkarato.smarbiz.sbs`: new subdomain is optional; create A to `143.20.60.195` only when original user data and bot token moved and TLS ready.
+
+## Prepared reverse-proxy configuration (not enabled)
+- [Preparation run SUCCESS](https://github.com/hsdarestani/rednotedownloader/actions/runs/39855589116). HTTP vhost templates for `camcam.smarbiz.sbs` and `bebinkarato.smarbiz.sbs` saved to `/opt/shared-vps-staging/proxy-templates/`.
+- Nginx virtualhosts were not enabled or reloaded, to preserve current sites and prevent insecure public access before TLS certificates and data migration.
+- CamCam local gateway `127.0.0.1:8117`, BebinKarato `127.0.0.1:8106`. Both health routes checked. Certificate only available for `rishe.store`, so HTTPS certificates for new hostnames remain outstanding.
