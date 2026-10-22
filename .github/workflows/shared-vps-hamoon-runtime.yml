@@ -1,0 +1,129 @@
+name: Install fresh Hamoon dashboard and MariaDB on shared VPS
+on:
+  push:
+    branches: [ops/shared-vps-inventory-20261022]
+    paths: [.github/workflows/shared-vps-hamoon-runtime.yml]
+permissions:
+  contents: read
+concurrency:
+  group: pars-vps-staging
+  cancel-in-progress: false
+jobs:
+  install:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate server
+        env:
+          SERVER: ${{ secrets.HOST }}
+        run: test "$SERVER" = "143.20.60.195"
+      - name: Install empty fresh Hamoon DB and internal dashboard
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          username: root
+          password: ${{ secrets.PASS }}
+          command_timeout: 17m
+          script: |
+            set -euo pipefail
+            exec 9>/var/lock/pars-vds-bot-deploy.lock
+            flock -w 300 9
+            case " $(hostname -I) " in *" 143.20.60.195 "*) : ;; *) exit 1 ;; esac
+            systemctl is-active --quiet rednotedownloader
+            test -f /home/hamoondeploy/hamoon-source/server.js
+            test "$(df -Pk / | awk 'NR==2 {print $4}')" -gt 1250000
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq
+            apt-get install -y -qq --no-install-recommends nodejs npm mariadb-server
+            apt-get clean
+            rm -rf /var/lib/apt/lists/*
+            node -v
+            npm -v
+            systemctl enable --now mariadb
+            systemctl is-active --quiet mariadb
+            install -d -m 0700 /etc/shared-vps-secrets
+            if [ ! -s /etc/shared-vps-secrets/hamoon-db-pass ]; then
+              openssl rand -hex 24 >/etc/shared-vps-secrets/hamoon-db-pass
+              chmod 600 /etc/shared-vps-secrets/hamoon-db-pass
+            fi
+            PASS_NEW="$(cat /etc/shared-vps-secrets/hamoon-db-pass)"
+            mysql -uroot <<EOF
+            CREATE DATABASE IF NOT EXISTS hamooncloud_db CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+            CREATE USER IF NOT EXISTS 'hamoonapp'@'127.0.0.1' IDENTIFIED BY '$PASS_NEW';
+            ALTER USER 'hamoonapp'@'127.0.0.1' IDENTIFIED BY '$PASS_NEW';
+            GRANT ALL PRIVILEGES ON hamooncloud_db.* TO 'hamoonapp'@'127.0.0.1';
+            FLUSH PRIVILEGES;
+            EOF
+            APP=/home/hamoondeploy/hamoon-source
+            if [ ! -f "$APP/.env" ]; then
+              umask 077
+              ADMIN_PASS="$(openssl rand -hex 20)"
+              SESSION="$(openssl rand -hex 32)"
+              SERVER_SECRET="$(openssl rand -hex 32)"
+              cat > "$APP/.env" <<EOF
+            DB_HOST=127.0.0.1
+            DB_NAME=hamooncloud_db
+            DB_USER=hamoonapp
+            DB_PASSWORD=$PASS_NEW
+            DB_AUTO_INIT=true
+            DASHBOARD_PORT=8108
+            DASHBOARD_BIND_ADDRESS=127.0.0.1
+            ADMIN_DASHBOARD_USER=admin
+            ADMIN_DASHBOARD_PASSWORD=$ADMIN_PASS
+            ADMIN_DASHBOARD_SESSION_SECRET=$SESSION
+            DASHBOARD_SECURE_COOKIE=true
+            DASHBOARD_PUBLIC_URL=https://pay.hamooncloud.ir
+            CONSOLE_PUBLIC_BASE_URL=https://pay.hamooncloud.ir
+            CONSOLE_SESSION_SECRET=$(openssl rand -hex 32)
+            SERVER_SECRET_KEY=$SERVER_SECRET
+            TELEGRAM_BOT_TOKEN=
+            HOST_BOT_TOKEN=
+            HETZNER_API_TOKEN=
+            OS_AUTH_URL=
+            ZIBAL_MERCHANT=
+            EOF
+              chown hamoondeploy:hamoondeploy "$APP/.env"
+              chmod 600 "$APP/.env"
+            fi
+            test "$(df -Pk / | awk 'NR==2 {print $4}')" -gt 650000
+            echo "Installing Node runtime dependencies for brand new Hamoon instance"
+            su -s /bin/bash hamoondeploy -c "cd /home/hamoondeploy/hamoon-source && npm ci --omit=dev --no-audit --no-fund --cache /home/hamoondeploy/.npm-shared-cache"
+            rm -rf /home/hamoondeploy/.npm-shared-cache
+            test "$(df -Pk / | awk 'NR==2 {print $4}')" -gt 350000
+            echo "Initializing brand-new Hamoon DB, no data copied from previous hosts"
+            su -s /bin/bash hamoondeploy -c "cd /home/hamoondeploy/hamoon-source && node -e 'require(\"./db\").initializeDatabase().then(()=>require(\"./db\").pool.end()).catch(e=>{ console.error(e.message);process.exit(1)})'"
+            cat > /etc/systemd/system/hamoon-dashboard.service <<'EOF'
+            [Unit]
+            Description=Hamoon fresh dashboard / API on shared VPS
+            Wants=network-online.target mariadb.service
+            After=network-online.target mariadb.service
+            [Service]
+            Type=simple
+            User=hamoondeploy
+            Group=hamoondeploy
+            WorkingDirectory=/home/hamoondeploy/hamoon-source
+            EnvironmentFile=/home/hamoondeploy/hamoon-source/.env
+            ExecStart=/usr/bin/node server.js
+            Restart=on-failure
+            RestartSec=8
+            MemoryMax=384M
+            NoNewPrivileges=true
+            PrivateTmp=true
+            ProtectSystem=strict
+            ReadWritePaths=/home/hamoondeploy/hamoon-source
+            [Install]
+            WantedBy=multi-user.target
+            EOF
+            systemctl daemon-reload
+            systemctl enable --now hamoon-dashboard
+            sleep 5
+            echo "Hamoon internal health:"
+            curl -fsS --max-time 8 http://127.0.0.1:8108/health
+            systemctl is-active --quiet hamoon-dashboard
+            systemctl is-active --quiet rednotedownloader
+            curl -fsS --max-time 4 http://127.0.0.1:8106/health >/dev/null
+            curl -fsS --max-time 4 http://127.0.0.1:8117/health >/dev/null
+            nginx -t
+            echo "New host disk/memory"
+            df -h /; free -h
+            echo 'HAMOON_FRESH_DB_DASHBOARD_READY'
