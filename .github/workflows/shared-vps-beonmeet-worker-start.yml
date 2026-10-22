@@ -109,6 +109,10 @@ jobs:
             from pathlib import Path
             path=Path('/opt/beonmeet/.env')
             s=path.read_text()
+            # Repair any prior broken dotenv serialization where separators were
+            # written as literal backslash-n bytes, not linefeed bytes.
+            if s.count(chr(10)) <= 1 and chr(92)+'n' in s:
+                s=s.replace(chr(92)+'n',chr(10))
             values={
               'MEETING_BOT_URL':'http://127.0.0.1:9124',
               'FREE_MEETING_BOT_URL':'http://127.0.0.1:9124',
@@ -123,7 +127,7 @@ jobs:
             d=dict(l.split('=',1) for l in s.splitlines() if '=' in l)
             d.update(values)
             tmp=path.with_suffix('.env.tmp')
-            tmp.write_text(''.join(k+'='+v+'\\n' for k,v in d.items()))
+            tmp.write_text(''.join(k+'='+v+chr(10) for k,v in d.items()))
             tmp.chmod(0o600)
             tmp.replace(path)
             PY
