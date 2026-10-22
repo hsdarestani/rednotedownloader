@@ -1,0 +1,32 @@
+name: Diagnose isolated BeOnMeet callback bridge
+on:
+  push:
+    branches: [ops/shared-vps-inventory-20261022]
+    paths: [.github/workflows/shared-vps-beonmeet-bridge-diag.yml]
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify VPS
+        env:
+          H: ${{ secrets.HOST }}
+        run: test "$H" = "143.20.60.195"
+      - name: Read-only bridge diagnostics
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          username: root
+          password: ${{ secrets.PASS }}
+          command_timeout: 2m
+          script: |
+            set -eu
+            systemctl status beonmeet-docker-bridge --no-pager -l | tail -20 || true
+            journalctl -u beonmeet-docker-bridge --no-pager -n 30 || true
+            docker network inspect beonmeet-single --format '{{json .IPAM.Config}}'
+            ip -4 addr | grep -A2 -B1 '172.23' || true
+            ss -ltn | grep -E '8119|8109|9124' || true
+            df -h /
+            curl -sfS --max-time 5 http://127.0.0.1:8109/health | head -c 140 || true
