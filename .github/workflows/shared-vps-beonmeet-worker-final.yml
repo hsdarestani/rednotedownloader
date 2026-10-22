@@ -93,7 +93,8 @@ jobs:
             echo "Check direct worker network links:"
             docker exec beonmeet-worker-single curl -fsS --max-time 5 http://beonmeet-chrome-single:9223/json/version >/dev/null
             docker exec beonmeet-worker-single curl -fsS --max-time 5 "http://$BRIDGE_IP:8119/health" >/dev/null
-            if ! docker logs beonmeet-worker-single 2>&1 | grep -q 'Loaded null sink module'; then
+            docker logs beonmeet-worker-single > /tmp/beonmeet-audio-boot.log 2>&1
+            if ! grep -Fq 'Loaded null sink module' /tmp/beonmeet-audio-boot.log; then
               echo 'Worker audio sink not initialized; stop only worker'
               docker stop beonmeet-worker-single >/dev/null || true
               exit 1
