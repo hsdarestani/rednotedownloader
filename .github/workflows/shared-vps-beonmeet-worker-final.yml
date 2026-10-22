@@ -1,0 +1,124 @@
+name: Finalize BeOnMeet idle one-worker system with verified PulseAudio
+on:
+  push:
+    branches: [ops/shared-vps-inventory-20261022]
+    paths: [.github/workflows/shared-vps-beonmeet-worker-final.yml]
+permissions:
+  contents: read
+concurrency:
+  group: pars-vps-staging
+  cancel-in-progress: false
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify intended host
+        env:
+          H: ${{ secrets.HOST }}
+        run: test "$H" = "143.20.60.195"
+      - name: Switch idle worker image, connect controller and verify audio readiness
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          username: root
+          password: ${{ secrets.PASS }}
+          command_timeout: 9m
+          script: |
+            set -euo pipefail
+            exec 9>/var/lock/pars-vds-bot-deploy.lock
+            flock -w 300 9
+            case " $(hostname -I) " in *" 143.20.60.195 "*) : ;; *) exit 1 ;; esac
+            test "$(df -Pk / | awk 'NR==2 {print $4}')" -gt 2100000
+            systemctl is-active --quiet beonmeet-controller
+            systemctl is-active --quiet rednotedownloader
+            docker image inspect beonmeet-worker-audiofix:latest >/dev/null
+            test "$(docker inspect -f '{{.State.Running}}' beonmeet-chrome-single)" = true
+            test "$(docker inspect -f '{{.State.Running}}' beonmeet-redis-single)" = true
+            BRIDGE_IP="$(docker network inspect -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' beonmeet-single)"
+            curl -fsS --max-time 5 "http://$BRIDGE_IP:8119/health" >/dev/null
+            python3 - <<'PY'
+            from pathlib import Path
+            import os
+            p=Path('/opt/beonmeet/.env')
+            lines=p.read_text().splitlines()
+            if len(lines)<20:raise SystemExit('Malformed controller env')
+            d=dict(line.split('=',1) for line in lines if '=' in line)
+            if not d.get('INTERNAL_SECRET'):raise SystemExit('Internal auth secret missing')
+            settings={
+              'MEETING_BOT_URL':'http://127.0.0.1:9124',
+              'FREE_MEETING_BOT_URL':'http://127.0.0.1:9124',
+              'PREMIUM_MEETING_BOT_URL':'http://127.0.0.1:9124',
+              'FREE_WORKER_URLS':'http://127.0.0.1:9124',
+              'PREMIUM_WORKER_URLS':'http://127.0.0.1:9124',
+              'REDIS_URL':'redis://127.0.0.1:9125/0',
+              'AUTOSCALE_ENABLED':'false',
+              'BEONMEET_STAGING_NO_POLL':'1',
+              'FREE_MEETING_SLOTS':'0',
+              'PREMIUM_MEETING_SLOTS':'0'
+            }
+            d.update(settings)
+            temp=p.with_name('.env.updated.tmp')
+            temp.write_text(''.join(k+'='+v+chr(10) for k,v in d.items()))
+            os.chmod(temp,0o600)
+            temp.replace(p)
+            print('BeOnMeet controller and worker endpoint config ready (secrets not printed)')
+            PY
+            # No live recording jobs exist: controller is deliberately in no-poll mode.
+            docker rm -f beonmeet-worker-single >/dev/null 2>&1 || true
+            docker run -d --name beonmeet-worker-single --restart unless-stopped \
+              --network beonmeet-single --memory=760m --memory-swap=1200m --cpus=.55 --pids-limit=260 --shm-size=192m \
+              --security-opt no-new-privileges -p 127.0.0.1:9124:3000 \
+              --env-file /opt/beonmeet/.env \
+              -e NODE_ENV=production -e REDIS_HOST=beonmeet-redis-single -e REDIS_PORT=6379 \
+              -e REDIS_CONSUMER_ENABLED=false \
+              -e GOOGLE_CHROME_CDP_URL=http://beonmeet-chrome-single:9223 \
+              -e RECORDING_TMP_DIR=/recordings \
+              -e CONTROLLER_UPLOAD_URL="http://$BRIDGE_IP:8119/internal/recording-ready" \
+              -e CONTROLLER_RECORDING_STARTED_URL="http://$BRIDGE_IP:8119/internal/recording-started" \
+              -e CONTROLLER_WAITING_FOR_ADMISSION_URL="http://$BRIDGE_IP:8119/internal/waiting-for-admission" \
+              -e UPLOADER_FILE_EXTENSION=.webm \
+              -e MAX_RECORDING_DURATION_MINUTES=240 -e MAX_CONCURRENT_MEETINGS=1 \
+              -v /dev/shm/beonmeet:/recordings beonmeet-worker-audiofix:latest >/dev/null
+            READY=0
+            for n in $(seq 1 40); do
+              if curl -fsS --max-time 3 http://127.0.0.1:9124/health >/tmp/beonmeet-worker-final-health.json 2>/dev/null; then READY=1; break; fi
+              sleep 3
+            done
+            if [ "$READY" -ne 1 ]; then
+              echo 'Idle BeOnMeet worker failed; keeping other services unchanged'
+              docker stop beonmeet-worker-single >/dev/null || true
+              exit 1
+            fi
+            echo "Check direct worker network links:"
+            docker exec beonmeet-worker-single curl -fsS --max-time 5 http://beonmeet-chrome-single:9223/json/version >/dev/null
+            docker exec beonmeet-worker-single curl -fsS --max-time 5 "http://$BRIDGE_IP:8119/health" >/dev/null
+            if ! docker logs beonmeet-worker-single 2>&1 | grep -q 'Loaded null sink module'; then
+              echo 'Worker audio sink not initialized; stop only worker'
+              docker stop beonmeet-worker-single >/dev/null || true
+              exit 1
+            fi
+            systemctl restart beonmeet-controller
+            OK=0
+            for n in $(seq 1 25); do
+              if curl -fsS --max-time 5 http://127.0.0.1:8109/health >/tmp/beonmeet-controller-final-health.json 2>/dev/null; then OK=1; break; fi
+              sleep 3
+            done
+            if [ "$OK" -ne 1 ]; then echo 'Controller restart failed'; exit 1; fi
+            python3 - <<'PY'
+            import json
+            x=json.load(open('/tmp/beonmeet-controller-final-health.json'))
+            assert x.get('ok') is True
+            assert x.get('autoscaler_enabled') is False
+            assert x.get('max_concurrent_meetings') == 0
+            print('BeOnMeet ready for one-at-a-time authenticated Google recording setup; polling safely disabled')
+            PY
+            MEM="$(awk '/MemAvailable:/ {print $2}' /proc/meminfo)"
+            DISK="$(df -Pk / | awk 'NR==2 {print $4}')"
+            echo "Free memory KiB=$MEM disk KiB=$DISK"
+            if [ "$MEM" -lt 180000 ] || [ "$DISK" -lt 1200000 ]; then docker stop beonmeet-worker-single >/dev/null || true; exit 1; fi
+            for port in 8106 8117 8108 8109 9124 9123; do curl -fsS --max-time 5 "http://127.0.0.1:$port/health" >/dev/null 2>&1 || test "$port" = 9123; done
+            systemctl is-active --quiet rednotedownloader
+            systemctl is-active --quiet hamoon-dashboard
+            nginx -t
+            echo 'BEONMEET_AUDIO_WORKER_CONTROLLER_INTEGRATION_OK'
