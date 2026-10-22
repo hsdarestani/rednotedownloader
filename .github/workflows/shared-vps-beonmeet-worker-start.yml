@@ -57,7 +57,12 @@ jobs:
             EOF
             systemctl daemon-reload
             systemctl enable --now beonmeet-docker-bridge
-            curl -fsS --max-time 4 "http://$BRIDGE_IP:8119/health" >/dev/null
+            BRIDGE_READY=0
+            for try in $(seq 1 20); do
+              if curl -fsS --max-time 4 "http://$BRIDGE_IP:8119/health" >/dev/null 2>&1; then BRIDGE_READY=1; break; fi
+              sleep 2
+            done
+            test "$BRIDGE_READY" = 1
             docker volume inspect beonmeet_single_redis_data >/dev/null 2>&1 || docker volume create beonmeet_single_redis_data >/dev/null
             if ! docker inspect beonmeet-redis-single >/dev/null 2>&1; then
               docker run -d --name beonmeet-redis-single --restart unless-stopped \
