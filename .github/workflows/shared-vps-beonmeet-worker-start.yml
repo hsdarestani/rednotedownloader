@@ -30,7 +30,7 @@ jobs:
             flock -w 300 9
             case " $(hostname -I) " in *" 143.20.60.195 "*) : ;; *) exit 1 ;; esac
             systemctl is-active --quiet rednotedownloader
-            systemctl is-active --quiet beonmeet-controller
+            # Controller is intentionally recovered later, after repairing .env
             docker image inspect beonmeet-worker-shared:latest >/dev/null
             test "$(df -Pk / | awk 'NR==2 {print $4}')" -gt 1700000
             test "$(docker inspect -f '{{.State.Running}}' beonmeet-chrome-single)" = true
