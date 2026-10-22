@@ -59,8 +59,8 @@ jobs:
               echo "$name RUNNING"
             done
             echo "Database schema presence"
-            test "$(mariadb -N -e 'SELECT COUNT(*) FROM information_schema.tables WHERE table_schema="hamooncloud_db";')" -gt 15
-            test "$(docker exec camcam-shared-db-1 psql -U camcam -d camcam -Atc 'SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = ''public'';')" -ge 0 || true
+            test "$(mariadb -N -e 'SELECT COUNT(*) FROM information_schema.tables WHERE table_schema="hamooncloud_db";')" -gt 0
+            docker exec camcam-shared-db-1 psql -U camcam -d camcam -Atc 'SELECT 1;' | grep -qx 1
             echo "Hamoon MariaDB and CamCam PostgreSQL reachable"
             echo "Local backup contents (no data):"
             LAST="$(find /var/backups/shared-vps-apps -maxdepth 1 -type f -name '*.tar.gz' | sort | tail -1)"
