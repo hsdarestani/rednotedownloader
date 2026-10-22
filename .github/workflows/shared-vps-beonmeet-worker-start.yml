@@ -1,0 +1,143 @@
+name: Start one BeOnMeet recorder worker and local-only callback bridge
+on:
+  push:
+    branches: [ops/shared-vps-inventory-20261022]
+    paths: [.github/workflows/shared-vps-beonmeet-worker-start.yml]
+permissions:
+  contents: read
+concurrency:
+  group: pars-vps-staging
+  cancel-in-progress: false
+jobs:
+  start:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check destination identity
+        env:
+          H: ${{ secrets.HOST }}
+        run: test "$H" = "143.20.60.195"
+      - name: Activate one idle BeOnMeet worker (no Google or Telegram polling)
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          username: root
+          password: ${{ secrets.PASS }}
+          command_timeout: 8m
+          script: |
+            set -euo pipefail
+            exec 9>/var/lock/pars-vds-bot-deploy.lock
+            flock -w 300 9
+            case " $(hostname -I) " in *" 143.20.60.195 "*) : ;; *) exit 1 ;; esac
+            systemctl is-active --quiet rednotedownloader
+            systemctl is-active --quiet beonmeet-controller
+            docker image inspect beonmeet-worker-shared:latest >/dev/null
+            test "$(df -Pk / | awk 'NR==2 {print $4}')" -gt 1700000
+            test "$(docker inspect -f '{{.State.Running}}' beonmeet-chrome-single)" = true
+            docker network inspect beonmeet-single >/dev/null
+            BRIDGE_IP="$(docker network inspect -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' beonmeet-single)"
+            case "$BRIDGE_IP" in 172.*|10.*|192.168.*) : ;; *) echo 'Unexpected docker network gateway'; exit 1 ;; esac
+            apt-get update -qq
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends socat
+            apt-get clean
+            rm -rf /var/lib/apt/lists/*
+            cat > /etc/systemd/system/beonmeet-docker-bridge.service <<EOF
+            [Unit]
+            Description=BeOnMeet private bridge from Docker worker to localhost controller
+            Wants=network-online.target docker.service beonmeet-controller.service
+            After=network-online.target docker.service beonmeet-controller.service
+            [Service]
+            Type=simple
+            ExecStart=/usr/bin/socat TCP-LISTEN:8119,bind=$BRIDGE_IP,reuseaddr,fork TCP:127.0.0.1:8109
+            Restart=always
+            RestartSec=3
+            NoNewPrivileges=true
+            [Install]
+            WantedBy=multi-user.target
+            EOF
+            systemctl daemon-reload
+            systemctl enable --now beonmeet-docker-bridge
+            curl -fsS --max-time 4 "http://$BRIDGE_IP:8119/health" >/dev/null
+            docker volume inspect beonmeet_single_redis_data >/dev/null 2>&1 || docker volume create beonmeet_single_redis_data >/dev/null
+            if ! docker inspect beonmeet-redis-single >/dev/null 2>&1; then
+              docker run -d --name beonmeet-redis-single --restart unless-stopped \
+                --network beonmeet-single --memory=128m --cpus=.15 \
+                -p 127.0.0.1:9125:6379 -v beonmeet_single_redis_data:/data \
+                redis:7-alpine redis-server --appendonly yes --appendfsync everysec >/dev/null
+            else docker start beonmeet-redis-single >/dev/null || true; fi
+            install -d -m 2770 -o beonmeet -g 1001 /dev/shm/beonmeet
+            chown beonmeet:1001 /dev/shm/beonmeet
+            chmod 2770 /dev/shm/beonmeet
+            if ! docker inspect beonmeet-worker-single >/dev/null 2>&1; then
+              docker run -d --name beonmeet-worker-single --restart unless-stopped \
+                --network beonmeet-single --memory=760m --memory-swap=1200m --cpus=.55 --pids-limit=250 --shm-size=192m \
+                --security-opt no-new-privileges \
+                -p 127.0.0.1:9124:3000 \
+                --env-file /opt/beonmeet/.env \
+                -e NODE_ENV=production -e REDIS_HOST=beonmeet-redis-single -e REDIS_PORT=6379 \
+                -e REDIS_CONSUMER_ENABLED=false \
+                -e GOOGLE_CHROME_CDP_URL=http://beonmeet-chrome-single:9223 \
+                -e RECORDING_TMP_DIR=/recordings \
+                -e CONTROLLER_UPLOAD_URL="http://$BRIDGE_IP:8119/internal/recording-ready" \
+                -e CONTROLLER_RECORDING_STARTED_URL="http://$BRIDGE_IP:8119/internal/recording-started" \
+                -e CONTROLLER_WAITING_FOR_ADMISSION_URL="http://$BRIDGE_IP:8119/internal/waiting-for-admission" \
+                -e UPLOADER_FILE_EXTENSION=.webm \
+                -e MAX_RECORDING_DURATION_MINUTES=240 \
+                -e MAX_CONCURRENT_MEETINGS=1 \
+                -v /dev/shm/beonmeet:/recordings \
+                beonmeet-worker-shared:latest >/dev/null
+            else docker start beonmeet-worker-single >/dev/null || true; fi
+            OK=0
+            for n in $(seq 1 55); do
+              if curl -fsS --max-time 3 http://127.0.0.1:9124/health > /tmp/beonmeet-worker-health.json 2>/dev/null; then OK=1; break; fi
+              sleep 3
+            done
+            if [ "$OK" -ne 1 ]; then
+              echo 'Worker health not ready; stop NEW worker only, preserve all original services.'
+              docker ps --filter name=beonmeet
+              docker stop beonmeet-worker-single >/dev/null || true
+              exit 1
+            fi
+            echo "BeOnMeet single worker health:"
+            cat /tmp/beonmeet-worker-health.json; echo
+            cat > /tmp/beonmeet-controller-settings.py <<'PY'
+            from pathlib import Path
+            path=Path('/opt/beonmeet/.env')
+            s=path.read_text()
+            values={
+              'MEETING_BOT_URL':'http://127.0.0.1:9124',
+              'FREE_MEETING_BOT_URL':'http://127.0.0.1:9124',
+              'PREMIUM_MEETING_BOT_URL':'http://127.0.0.1:9124',
+              'FREE_WORKER_URLS':'http://127.0.0.1:9124',
+              'PREMIUM_WORKER_URLS':'http://127.0.0.1:9124',
+              'REDIS_URL':'redis://127.0.0.1:9125/0',
+              'AUTOSCALE_ENABLED':'false',
+              'BEONMEET_STAGING_NO_POLL':'1',
+              'FREE_MEETING_SLOTS':'0',
+              'PREMIUM_MEETING_SLOTS':'0'}
+            d=dict(l.split('=',1) for l in s.splitlines() if '=' in l)
+            d.update(values)
+            tmp=path.with_suffix('.env.tmp')
+            tmp.write_text(''.join(k+'='+v+'\\n' for k,v in d.items()))
+            tmp.chmod(0o600)
+            tmp.replace(path)
+            PY
+            python3 /tmp/beonmeet-controller-settings.py
+            rm /tmp/beonmeet-controller-settings.py
+            systemctl restart beonmeet-controller
+            sleep 4
+            curl -fsS --max-time 4 http://127.0.0.1:8109/health >/tmp/beonmeet-controller-health.json
+            MEM="$(awk '/MemAvailable:/ {print $2}' /proc/meminfo)"
+            DISK="$(df -Pk / | awk 'NR==2 {print $4}')"
+            echo "Available: MEM=$MEM KiB DISK=$DISK KiB"
+            if [ "$MEM" -lt 180000 ] || [ "$DISK" -lt 1200000 ]; then
+              docker stop beonmeet-worker-single >/dev/null || true
+              echo 'Worker stopped: headroom threshold breached'
+              exit 1
+            fi
+            systemctl is-active --quiet rednotedownloader
+            systemctl is-active --quiet hamoon-dashboard
+            systemctl is-active --quiet beonmeet-controller
+            for port in 8106 8117 8108 8109; do curl -fsS --max-time 5 "http://127.0.0.1:$port/health" >/dev/null; done
+            nginx -t
+            echo 'BEONMEET_IDLE_SINGLE_WORKER_AND_PRIVATE_CALLBACK_BRIDGE_READY'
