@@ -1,0 +1,101 @@
+name: Set up daily local database backups for all four fresh apps
+on:
+  push:
+    branches: [ops/shared-vps-inventory-20261022]
+    paths: [.github/workflows/shared-vps-daily-backups.yml]
+permissions:
+  contents: read
+concurrency:
+  group: pars-vps-staging
+  cancel-in-progress: false
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify host
+        env:
+          H: ${{ secrets.HOST }}
+        run: test "$H" = "143.20.60.195"
+      - name: Install and test 2-day retained local backups
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          username: root
+          password: ${{ secrets.PASS }}
+          command_timeout: 8m
+          script: |
+            set -euo pipefail
+            exec 9>/var/lock/pars-vds-bot-deploy.lock
+            flock -w 300 9
+            case " $(hostname -I) " in *" 143.20.60.195 "*) : ;; *) exit 1 ;; esac
+            install -d -m 0700 /var/backups/shared-vps-apps
+            cat >/usr/local/sbin/shared-vps-backup <<'SCRIPT'
+            #!/usr/bin/env bash
+            set -euo pipefail
+            exec 8>/var/lock/shared-vps-backup.lock
+            flock -n 8 || exit 0
+            test "$(df -Pk / | awk 'NR==2 {print $4}')" -gt 2200000 || { echo 'NOT_ENOUGH_DISK_HEADROOM'; exit 1; }
+            ROOT=/var/backups/shared-vps-apps
+            install -d -m 0700 "$ROOT"
+            DAY="$(date -u +%Y%m%dT%H%M%SZ)"
+            OUT="$(mktemp -d "$ROOT/.creating-$DAY-XXXX")"
+            trap 'rm -rf "$OUT"' EXIT
+            mariadb-dump --single-transaction --quick hamooncloud_db | gzip -1 >"$OUT/hamoon-mariadb.sql.gz"
+            docker exec camcam-shared-db-1 pg_dump --no-owner --no-privileges -U camcam camcam | gzip -1 >"$OUT/camcam-postgresql.sql.gz"
+            python3 - "$OUT" <<'PY'
+            from pathlib import Path
+            import sys,sqlite3
+            out=Path(sys.argv[1])
+            for name,folder in [('bebinkarato',Path('/opt/bebinkarato/app/data')),('beonmeet',Path('/opt/beonmeet/data'))]:
+                for item in folder.glob('*.db'):
+                    try:
+                        source=sqlite3.connect('file:'+str(item)+'?mode=ro',uri=True)
+                        destination=sqlite3.connect(str(out/(name+'-'+item.name)))
+                        with destination:source.backup(destination)
+                        destination.close()
+                        source.close()
+                    except sqlite3.Error as exc:
+                        raise RuntimeError(f'{name} sqlite backup failed: {exc}') from exc
+            PY
+            test -s "$OUT/hamoon-mariadb.sql.gz"
+            test -s "$OUT/camcam-postgresql.sql.gz"
+            cd "$ROOT"
+            tar --no-recursion -czf "$DAY.tar.gz" -C "$OUT" .
+            chmod 600 "$DAY.tar.gz"
+            tar -tzf "$DAY.tar.gz" >/dev/null
+            echo "Backup made: $DAY.tar.gz"
+            find "$ROOT" -maxdepth 1 -name '*.tar.gz' -type f -mtime +2 -delete
+            SCRIPT
+            chmod 700 /usr/local/sbin/shared-vps-backup
+            cat >/etc/systemd/system/shared-vps-backup.service <<'EOF'
+            [Unit]
+            Description=Local backup for four application DBs
+            After=docker.service mariadb.service
+            Requires=docker.service mariadb.service
+            [Service]
+            Type=oneshot
+            ExecStart=/usr/local/sbin/shared-vps-backup
+            Nice=10
+            IOSchedulingClass=best-effort
+            IOSchedulingPriority=7
+            EOF
+            cat >/etc/systemd/system/shared-vps-backup.timer <<'EOF'
+            [Unit]
+            Description=Nightly local application DB backups
+            [Timer]
+            OnCalendar=*-*-* 03:45:00 UTC
+            Persistent=true
+            RandomizedDelaySec=20m
+            Unit=shared-vps-backup.service
+            [Install]
+            WantedBy=timers.target
+            EOF
+            systemctl daemon-reload
+            systemctl enable --now shared-vps-backup.timer
+            systemctl start shared-vps-backup.service
+            systemctl is-failed --quiet shared-vps-backup.service && exit 1 || true
+            find /var/backups/shared-vps-apps -maxdepth 1 -type f -name '*.tar.gz' -printf '%f %k KB\n'
+            systemctl is-enabled shared-vps-backup.timer
+            systemctl is-active --quiet rednotedownloader
+            echo 'LOCAL_DATABASE_BACKUP_TIMER_READY'
