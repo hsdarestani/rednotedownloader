@@ -50,7 +50,13 @@ jobs:
             docker compose -p camcam-shared -f docker-compose.yml -f docker-compose.shared-vps.yml up --no-build -d pet mediamtx archive petarchive
             READY=0
             for i in $(seq 1 30); do
-              if docker compose -p camcam-shared -f docker-compose.yml -f docker-compose.shared-vps.yml ps --format json | python3 -c 'import json,sys; raw=sys.stdin.read(); data=json.loads(raw); required={"api","db","redis","pet","mediamtx","archive","petarchive"}; assert required.issubset({x["Service"] for x in data}); assert all(x["State"]=="running" and x.get("Health") not in ("unhealthy","starting") for x in data if x["Service"] in required)' 2>/dev/null; then READY=1; break; fi
+              GOOD=1
+              for name in camcam-shared-api-1 camcam-shared-db-1 camcam-shared-redis-1 camcam-shared-pet-1 camcam-shared-mediamtx-1 camcam-shared-archive-1 camcam-shared-petarchive-1; do
+                RUNNING="$(docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null || true)"
+                HEALTH="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$name" 2>/dev/null || true)"
+                if [ "$RUNNING" != true ] || [ "$HEALTH" = unhealthy ] || [ "$HEALTH" = starting ]; then GOOD=0; break; fi
+              done
+              if [ "$GOOD" -eq 1 ]; then READY=1; break; fi
               sleep 4
             done
             if [ "$READY" -ne 1 ]; then
