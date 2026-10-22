@@ -1,0 +1,85 @@
+name: Complete isolated CamCam service stack
+on:
+  push:
+    branches: [ops/shared-vps-inventory-20261022]
+    paths: [.github/workflows/shared-vps-camcam-services.yml]
+permissions:
+  contents: read
+concurrency:
+  group: pars-vps-staging
+  cancel-in-progress: false
+jobs:
+  services:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate intended host
+        env:
+          HOST_EXPECTED: ${{ secrets.HOST }}
+        run: test "$HOST_EXPECTED" = "143.20.60.195"
+      - name: Activate CamCam services on loopback gateway
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          username: root
+          password: ${{ secrets.PASS }}
+          command_timeout: 17m
+          script: |
+            set -euo pipefail
+            exec 9>/var/lock/pars-vds-bot-deploy.lock
+            flock -w 300 9
+            case " $(hostname -I) " in *" 143.20.60.195 "*) : ;; *) echo "wrong target"; exit 1 ;; esac
+            systemctl is-active --quiet rednotedownloader
+            cd /opt/camcam
+            test -f .env && test -f Caddyfile
+            test "$(df -Pk / | awk 'NR==2 {print $4}')" -gt 1250000
+            docker compose -p camcam-shared -f docker-compose.yml -f docker-compose.shared-vps.yml config -q
+            echo "Start CamCam pet, recorder transport and archives, WITHOUT project Caddy."
+            docker compose -p camcam-shared -f docker-compose.yml -f docker-compose.shared-vps.yml up -d --build pet mediamtx archive petarchive
+            echo "Wait for application health"
+            OK=0
+            for i in $(seq 1 35); do
+              if docker compose -p camcam-shared -f docker-compose.yml -f docker-compose.shared-vps.yml ps --format json | python3 -c 'import json,sys; d=[json.loads(s) for s in sys.stdin if s.strip()]; need={"api","db","redis","pet","mediamtx","archive","petarchive"}; assert need.issubset({x["Service"] for x in d}); assert all(x.get("State")=="running" and x.get("Health") not in ("unhealthy","starting") for x in d if x["Service"] in need)' 2>/dev/null; then OK=1; break; fi
+              sleep 4
+            done
+            if [ "$OK" -ne 1 ]; then
+              echo "CamCam dependent services not ready; stopping NEW dependent services only"
+              docker compose -p camcam-shared -f docker-compose.yml -f docker-compose.shared-vps.yml stop pet mediamtx archive petarchive || true
+              exit 1
+            fi
+            # Caddy is a purely local HTTP routing gateway: nginx keeps host port 80/443.
+            if [ ! -f Caddyfile.shared-vps ]; then
+              sed '1s/^camcam.smarbiz.sbs {/:80 {/' Caddyfile > Caddyfile.shared-vps
+            fi
+            if ! docker inspect camcam-shared-gateway >/dev/null 2>&1; then
+              docker run -d --name camcam-shared-gateway --restart unless-stopped --network camcam-shared_default -p 127.0.0.1:8117:80 -v /opt/camcam/Caddyfile.shared-vps:/etc/caddy/Caddyfile:ro -v /opt/camcam/web:/srv/camcam-web:ro caddy:2-alpine >/dev/null
+            else
+              docker start camcam-shared-gateway >/dev/null 2>&1 || true
+            fi
+            OK=0
+            for i in $(seq 1 25); do
+              if curl -fsS --max-time 3 -H 'Host: camcam.smarbiz.sbs' http://127.0.0.1:8117/health > /tmp/camcam-gateway-health.json 2>/dev/null; then OK=1; break; fi
+              sleep 3
+            done
+            if [ "$OK" -ne 1 ]; then
+              docker stop camcam-shared-gateway || true
+              echo "Gateway health failed"
+              exit 1
+            fi
+            cat /tmp/camcam-gateway-health.json
+            MEM_KB="$(awk '/MemAvailable:/ {print $2}' /proc/meminfo)"
+            DISK_KB="$(df -Pk / | awk 'NR==2 {print $4}')"
+            echo "headroom mem=$MEM_KB KB disk=$DISK_KB KB"
+            if [ "$MEM_KB" -lt 220000 ] || [ "$DISK_KB" -lt 400000 ]; then
+              echo "Staging footprint exceeded host headroom; stop ONLY new CamCam components"
+              docker stop camcam-shared-gateway || true
+              docker compose -p camcam-shared -f docker-compose.yml -f docker-compose.shared-vps.yml stop pet mediamtx archive petarchive || true
+              exit 1
+            fi
+            systemctl is-active --quiet rednotedownloader
+            curl -fsS --max-time 3 http://127.0.0.1:8106/health >/dev/null
+            curl -fsS --max-time 3 http://127.0.0.1:8107/health >/dev/null
+            nginx -t
+            echo "CamCam services:"
+            docker compose -p camcam-shared -f docker-compose.yml -f docker-compose.shared-vps.yml ps
+            echo "CAMCAM_BACKEND_GATEWAY_READY localhost:8117; production identity/data/DNS not switched"
