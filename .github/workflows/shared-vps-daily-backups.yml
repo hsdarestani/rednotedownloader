@@ -61,7 +61,7 @@ jobs:
             test -s "$OUT/hamoon-mariadb.sql.gz"
             test -s "$OUT/camcam-postgresql.sql.gz"
             cd "$ROOT"
-            tar --no-recursion -czf "$DAY.tar.gz" -C "$OUT" .
+            tar -czf "$DAY.tar.gz" -C "$OUT" .
             chmod 600 "$DAY.tar.gz"
             tar -tzf "$DAY.tar.gz" >/dev/null
             echo "Backup made: $DAY.tar.gz"
