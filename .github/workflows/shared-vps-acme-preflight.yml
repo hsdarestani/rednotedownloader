@@ -1,0 +1,85 @@
+name: Reserve four hostnames for safe ACME challenge before DNS cutover
+on:
+  push:
+    branches: [ops/shared-vps-inventory-20261022]
+    paths: [.github/workflows/shared-vps-acme-preflight.yml]
+permissions:
+  contents: read
+concurrency:
+  group: pars-vps-staging
+  cancel-in-progress: false
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Confirm host IP
+        env:
+          H: ${{ secrets.HOST }}
+        run: test "$H" = "143.20.60.195"
+      - name: Install safe HTTP-only ACME routing, never expose apps without HTTPS
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          username: root
+          password: ${{ secrets.PASS }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          command_timeout: 4m
+          script: |
+            set -euo pipefail
+            exec 9>/var/lock/pars-vds-bot-deploy.lock
+            flock -w 300 9
+            case " $(hostname -I) " in *" 143.20.60.195 "*) : ;; *) exit 1 ;; esac
+            systemctl is-active --quiet rednotedownloader
+            nginx -t
+            install -m 0755 -d /var/www/shared-vps-acme/.well-known/acme-challenge
+            install -m 0755 -d /etc/nginx/sites-available /etc/nginx/sites-enabled
+            for DOMAIN in camcam.smarbiz.sbs beonmeet.smarbiz.sbs bebinkarato.smarbiz.sbs pay.hamooncloud.ir; do
+              TARGET="/etc/nginx/sites-available/shared-vps-acme-$DOMAIN"
+              if [ -e "$TARGET" ]; then
+                echo "Existing destination found; refusing to overwrite: $TARGET"
+                exit 1
+              fi
+            done
+            CREATED=""
+            cleanup() {
+              echo "Rolling back only new ACME host files"
+              for D in camcam.smarbiz.sbs beonmeet.smarbiz.sbs bebinkarato.smarbiz.sbs pay.hamooncloud.ir; do
+                rm -f "/etc/nginx/sites-enabled/shared-vps-acme-$D"
+                rm -f "/etc/nginx/sites-available/shared-vps-acme-$D"
+              done
+              nginx -t && systemctl reload nginx || true
+            }
+            trap cleanup ERR
+            for DOMAIN in camcam.smarbiz.sbs beonmeet.smarbiz.sbs bebinkarato.smarbiz.sbs pay.hamooncloud.ir; do
+              cat > "/etc/nginx/sites-available/shared-vps-acme-$DOMAIN" <<EOF
+            # Initial ACME challenge/maintenance host only; never proxy authentication or payments over HTTP.
+            server {
+                listen 80;
+                server_name $DOMAIN;
+                location ^~ /.well-known/acme-challenge/ {
+                    root /var/www/shared-vps-acme;
+                    try_files \$uri =404;
+                    default_type text/plain;
+                }
+                location / {
+                    add_header Cache-Control "no-store" always;
+                    return 503;
+                }
+            }
+            EOF
+              ln -s "/etc/nginx/sites-available/shared-vps-acme-$DOMAIN" "/etc/nginx/sites-enabled/shared-vps-acme-$DOMAIN"
+            done
+            nginx -t
+            systemctl reload nginx
+            for DOMAIN in camcam.smarbiz.sbs beonmeet.smarbiz.sbs bebinkarato.smarbiz.sbs pay.hamooncloud.ir; do
+              CODE="$(curl -s -H "Host: $DOMAIN" -o /dev/null -w '%{http_code}' http://127.0.0.1/)"
+              test "$CODE" = 503
+              echo "$DOMAIN ACME_ONLY_HTTP_503"
+            done
+            curl -fsS http://127.0.0.1:8106/health >/dev/null
+            curl -fsS http://127.0.0.1:8117/health >/dev/null
+            curl -fsS http://127.0.0.1:8108/health >/dev/null
+            curl -fsS http://127.0.0.1:8109/health >/dev/null
+            systemctl is-active --quiet rednotedownloader
+            trap - ERR
+            echo 'ACME_HOSTNAMES_RESERVED_ON_80_APPS_STILL_PRIVATE_UNTIL_TLS'
