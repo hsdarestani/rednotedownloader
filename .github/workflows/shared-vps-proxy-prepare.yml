@@ -1,0 +1,67 @@
+name: Prepare nginx virtual hosts without cutover
+on:
+  push:
+    branches: [ops/shared-vps-inventory-20261022]
+    paths: [.github/workflows/shared-vps-proxy-prepare.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify target
+        env:
+          HOSTNAME_EXPECTED: ${{ secrets.HOST }}
+        run: test "$HOSTNAME_EXPECTED" = "143.20.60.195"
+      - name: Save disabled proxy templates (no reload)
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          username: root
+          password: ${{ secrets.PASS }}
+          command_timeout: 3m
+          script: |
+            set -euo pipefail
+            case " $(hostname -I) " in *" 143.20.60.195 "*) : ;; *) exit 1 ;; esac
+            install -d -m 0750 /opt/shared-vps-staging/proxy-templates
+            cat >/opt/shared-vps-staging/proxy-templates/camcam.smarbiz.sbs.conf <<'EOF'
+            # HTTP preflight only. NOT ENABLED. Add valid domain SSL first.
+            server {
+                listen 80;
+                server_name camcam.smarbiz.sbs;
+                location / {
+                    proxy_pass http://127.0.0.1:8117;
+                    proxy_http_version 1.1;
+                    proxy_set_header Host $host;
+                    proxy_set_header X-Real-IP $remote_addr;
+                    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                    proxy_set_header X-Forwarded-Proto $scheme;
+                    proxy_set_header Upgrade $http_upgrade;
+                    proxy_set_header Connection "upgrade";
+                    proxy_read_timeout 300s;
+                }
+            }
+            EOF
+            cat >/opt/shared-vps-staging/proxy-templates/bebinkarato.smarbiz.sbs.conf <<'EOF'
+            # HTTP preflight only. NOT ENABLED. Add valid domain SSL first.
+            server {
+                listen 80;
+                server_name bebinkarato.smarbiz.sbs;
+                location / {
+                    proxy_pass http://127.0.0.1:8106;
+                    proxy_http_version 1.1;
+                    proxy_set_header Host $host;
+                    proxy_set_header X-Real-IP $remote_addr;
+                    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                    proxy_set_header X-Forwarded-Proto $scheme;
+                }
+            }
+            EOF
+            echo "Proxy templates written to /opt/shared-vps-staging/proxy-templates/"
+            echo "Nginx config unchanged; no DNS or reload performed."
+            nginx -t
+            systemctl is-active --quiet rednotedownloader
+            curl -fsS http://127.0.0.1:8117/health >/dev/null
+            curl -fsS http://127.0.0.1:8106/health >/dev/null
+            echo "PROXY_TEMPLATES_READY"
