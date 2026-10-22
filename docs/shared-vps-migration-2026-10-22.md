@@ -64,3 +64,11 @@ Then issue four hostname certificates with ACME/Certbot, enable Nginx proxy vhos
 - Local backups don't protect against full VPS loss. Configure offsite backups when storage is available.
 - Temporary secret-bridge experiments were disabled and their VPS private encryption key deleted. No project secret values were printed to this report.
 - Ops changes are on GitHub branch `ops/shared-vps-inventory-20261022`; source-repo experiments are on separate `ops/shared-vps-source-audit-20261022` branches. Existing main-branch deployment workflows have **not** been retargeted; do not run old GitHub Actions deploy against the defunct origins.
+
+
+## HTTP ACME preflight installed after acceptance
+- [Safe four-domain Nginx preflight SUCCESS](https://github.com/hsdarestani/rednotedownloader/actions/runs/39869075648).
+- Nginx now has exact port-80 vhosts for each of the four proposed public domains serving **only ACME HTTP-01 challenges** from `/var/www/shared-vps-acme/.well-known/acme-challenge/`. All other plain HTTP requests return 503 and do not expose app/admin/payment traffic.
+- After Nginx reload, all four hostnames were verified to return 503 on the target with their Host headers; existing RedNote, CamCam, BebinKarato, Hamoon and BeOnMeet internal probes still passed.
+- **Important next external action:** Create/update the four DNS A records to `143.20.60.195`, preferably set Cloudflare DNS-only during first HTTP-01 certificate issuance. The user has not yet pointed these domains and there is no Cloudflare DNS management connection in this session. Once A records resolve, use Certbot with HTTP-01 webroot to issue certificates for each hostname; then create SSL 443 proxy vhosts and apply `nginx -t` plus controlled reload.
+- Do not interpret HTTP-503 placeholder responses as live public availability. The apps are healthy on private loopback, not publicly released.
