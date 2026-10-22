@@ -65,8 +65,9 @@ jobs:
             echo "Local backup contents (no data):"
             LAST="$(find /var/backups/shared-vps-apps -maxdepth 1 -type f -name '*.tar.gz' | sort | tail -1)"
             test -s "$LAST"
-            tar -tzf "$LAST" | grep -Fq hamoon-mariadb.sql.gz
-            tar -tzf "$LAST" | grep -Fq camcam-postgresql.sql.gz
+            tar -tzf "$LAST" > /tmp/shared-vps-backup-manifest.txt
+            grep -Fq hamoon-mariadb.sql.gz /tmp/shared-vps-backup-manifest.txt
+            grep -Fq camcam-postgresql.sql.gz /tmp/shared-vps-backup-manifest.txt
             echo 'Local backup includes both SQL snapshots'
             nginx -t
             df -h /
