@@ -1,0 +1,35 @@
+name: Read-only current service check
+on:
+  push:
+    branches: [ops/shared-vps-inventory-20261022]
+    paths: [.github/workflows/shared-vps-current-status.yml]
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate destination
+        env:
+          TARGET: ${{ secrets.HOST }}
+        run: test "$TARGET" = "143.20.60.195"
+      - name: Inspect services, no writes
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          username: root
+          password: ${{ secrets.PASS }}
+          command_timeout: 3m
+          script: |
+            set -eu
+            case " $(hostname -I) " in *" 143.20.60.195 "*) : ;; *) exit 1 ;; esac
+            date -u
+            df -h /; free -h
+            docker ps --format '{{.Names}} | {{.Status}} | {{.Ports}}'
+            for url in http://127.0.0.1:8106/health http://127.0.0.1:8107/health http://127.0.0.1:8117/health; do
+              printf 'probe %s: ' "$url"
+              curl --max-time 3 -sS -o /dev/null -w '%{http_code}\n' "$url" || true
+            done
+            systemctl is-active rednotedownloader
+            nginx -t
