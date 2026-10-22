@@ -1,0 +1,50 @@
+name: Fix BeOnMeet audio worker system dependencies
+on:
+  push:
+    branches: [ops/shared-vps-inventory-20261022]
+    paths: [.github/workflows/shared-vps-beonmeet-worker-hotfix.yml]
+permissions:
+  contents: read
+concurrency:
+  group: pars-vps-staging
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Confirm host
+        env:
+          H: ${{ secrets.HOST }}
+        run: test "$H" = "143.20.60.195"
+      - name: Prepare repaired audio-capable worker image (do not restart until ready)
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          username: root
+          password: ${{ secrets.PASS }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          command_timeout: 10m
+          script: |
+            set -euo pipefail
+            exec 9>/var/lock/pars-vds-bot-deploy.lock
+            flock -w 300 9
+            case " $(hostname -I) " in *" 143.20.60.195 "*) : ;; *) exit 1 ;; esac
+            test "$(df -Pk / | awk 'NR==2 {print $4}')" -gt 2600000
+            docker image inspect beonmeet-worker-shared:latest >/dev/null
+            cd /opt/beonmeet/upstream
+            cat > Dockerfile.shared-vps-audio-fix <<'EOF'
+            FROM beonmeet-worker-shared:latest
+            USER root
+            RUN apt-get update && apt-get install -y --no-install-recommends procps \
+              && rm -rf /var/lib/apt/lists/* \
+              && mkdir -p /tmp/.X11-unix \
+              && chmod 1777 /tmp/.X11-unix
+            USER nodejs
+            EOF
+            docker build --progress=plain -f Dockerfile.shared-vps-audio-fix -t beonmeet-worker-audiofix:latest .
+            docker builder prune -f || true
+            docker image inspect beonmeet-worker-audiofix:latest >/dev/null
+            systemctl is-active --quiet beonmeet-controller
+            systemctl is-active --quiet rednotedownloader
+            df -h /
+            echo "BEONMEET_AUDIOFIX_WORKER_IMAGE_BUILT"
