@@ -1,0 +1,48 @@
+name: Safely reclaim only unused Docker images for BeOnMeet recorder capacity
+on:
+  push:
+    branches: [ops/shared-vps-inventory-20261022]
+    paths: [.github/workflows/shared-vps-unused-images.yml]
+permissions:
+  contents: read
+concurrency:
+  group: pars-vps-staging
+  cancel-in-progress: false
+jobs:
+  reclaim:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate exact VPS
+        env:
+          HOST_CHECK: ${{ secrets.HOST }}
+        run: test "$HOST_CHECK" = "143.20.60.195"
+      - name: Delete ONLY images not referenced by any Docker container
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          username: root
+          password: ${{ secrets.PASS }}
+          command_timeout: 10m
+          script: |
+            set -euo pipefail
+            exec 9>/var/lock/pars-vds-bot-deploy.lock
+            flock -w 300 9
+            case " $(hostname -I) " in *" 143.20.60.195 "*) : ;; *) exit 1 ;; esac
+            echo "Before"; df -h /; docker system df
+            echo "Pruning ONLY Docker images not referenced by any containers. No container, volume or network pruning."
+            docker image prune --all --force
+            docker builder prune --all --force || true
+            echo "After"; df -h /; docker system df
+            echo "Verify existing running services"
+            systemctl is-active --quiet rednotedownloader
+            systemctl is-active --quiet hamoon-dashboard
+            systemctl is-active --quiet beonmeet-controller
+            for port in 8106 8107 8117 8108 8109; do
+              curl -fsS --max-time 6 "http://127.0.0.1:$port/health" >/dev/null
+            done
+            for name in rishestore_pars-app-1 rishestore_pars-worker-1 rishestore_pars-db-1 ordersvesta-bot orderscutella-bot camcam-shared-api-1 camcam-shared-db-1 camcam-shared-redis-1 bebinkarato; do
+              test "$(docker inspect -f '{{.State.Running}}' "$name")" = true
+            done
+            nginx -t
+            echo 'UNUSED_IMAGES_ONLY_CLEAN_SUCCESS'
