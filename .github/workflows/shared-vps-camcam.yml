@@ -1,0 +1,90 @@
+name: Stage CamCam API on shared VPS
+on:
+  push:
+    branches: [ops/shared-vps-inventory-20261022]
+    paths: [.github/workflows/shared-vps-camcam.yml]
+permissions:
+  contents: read
+concurrency:
+  group: pars-vps-staging
+  cancel-in-progress: false
+jobs:
+  stage:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify target
+        env:
+          EXPECTED: ${{ secrets.HOST }}
+        run: test "$EXPECTED" = "143.20.60.195"
+      - name: Stage isolated CamCam API
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          username: root
+          password: ${{ secrets.PASS }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          command_timeout: 18m
+          script: |
+            set -euo pipefail
+            exec 9>/var/lock/pars-vds-bot-deploy.lock
+            flock -w 300 9
+            case " $(hostname -I) " in
+              *" 143.20.60.195 "*) : ;;
+              *) echo "Wrong host"; exit 1 ;;
+            esac
+            systemctl is-active --quiet rednotedownloader
+            cd /opt/camcam
+            test -f docker-compose.yml
+            if [ ! -f .env ]; then
+              umask 077
+              SECRET_KEY="$(openssl rand -hex 48)"
+              DB_PASSWORD="$(openssl rand -hex 24)"
+              cat >.env <<EOF
+            APP_NAME=CamCam
+            BASE_URL=https://camcam.smarbiz.sbs
+            SECRET_KEY=$SECRET_KEY
+            DB_PASSWORD=$DB_PASSWORD
+            REDIS_URL=redis://redis:6379/0
+            ZIBAL_MERCHANT=
+            CLOUDFLARE_ACCOUNT_ID=
+            CLOUDFLARE_AI_TOKEN=
+            FIREBASE_SERVICE_ACCOUNT_B64=
+            ADMIN_EMAILS=
+            SECURE_COOKIES=true
+            WEBRTC_ADDITIONAL_HOSTS=143.20.60.195
+            EOF
+              chmod 600 .env
+            fi
+            cat > docker-compose.shared-vps.yml <<'EOF'
+            services:
+              api:
+                ports:
+                  - "127.0.0.1:8107:8000"
+            EOF
+            test "$(df -Pk / | awk 'NR==2 {print $4}')" -gt 1200000
+            docker compose -p camcam-shared -f docker-compose.yml -f docker-compose.shared-vps.yml config -q
+            docker compose -p camcam-shared -f docker-compose.yml -f docker-compose.shared-vps.yml up -d --build db redis api
+            OK=0
+            for i in $(seq 1 40); do
+              if curl -fsS --max-time 3 http://127.0.0.1:8107/health >/tmp/camcam-staging-health.json 2>/dev/null; then OK=1; break; fi
+              sleep 4
+            done
+            if [ "$OK" -ne 1 ]; then
+              echo "Health failed. Stopping staging containers"
+              docker compose -p camcam-shared -f docker-compose.yml -f docker-compose.shared-vps.yml stop api db redis || true
+              exit 1
+            fi
+            cat /tmp/camcam-staging-health.json
+            AVAILABLE_KB="$(awk '/MemAvailable:/ {print $2}' /proc/meminfo)"
+            FREE_KB="$(df -Pk / | awk 'NR==2 {print $4}')"
+            echo "MemAvailable $AVAILABLE_KB KiB, DiskAvailable $FREE_KB KiB"
+            if [ "$AVAILABLE_KB" -lt 250000 ] || [ "$FREE_KB" -lt 500000 ]; then
+              echo "Resources below safe staging threshold; stop only new CamCam services."
+              docker compose -p camcam-shared -f docker-compose.yml -f docker-compose.shared-vps.yml stop api db redis || true
+              exit 1
+            fi
+            systemctl is-active --quiet rednotedownloader
+            curl -fsS http://127.0.0.1:8106/health >/dev/null
+            nginx -t
+            docker compose -p camcam-shared -f docker-compose.yml -f docker-compose.shared-vps.yml ps
+            echo "CAMCAM_STAGE_OK"
