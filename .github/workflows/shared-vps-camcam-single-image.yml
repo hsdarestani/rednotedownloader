@@ -1,0 +1,90 @@
+name: CamCam shared-image services without rebuild
+on:
+  push:
+    branches: [ops/shared-vps-inventory-20261022]
+    paths: [.github/workflows/shared-vps-camcam-single-image.yml]
+permissions:
+  contents: read
+concurrency:
+  group: pars-vps-staging
+  cancel-in-progress: false
+jobs:
+  stage:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Confirm server
+        env:
+          VPS_HOST: ${{ secrets.HOST }}
+        run: test "$VPS_HOST" = "143.20.60.195"
+      - name: Deploy CamCam secondary roles from one existing image
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          username: root
+          password: ${{ secrets.PASS }}
+          command_timeout: 12m
+          script: |
+            set -euo pipefail
+            exec 9>/var/lock/pars-vds-bot-deploy.lock
+            flock -w 300 9
+            case " $(hostname -I) " in *" 143.20.60.195 "*) : ;; *) exit 1 ;; esac
+            cd /opt/camcam
+            test -f .env
+            docker image inspect camcam-shared-api:latest >/dev/null
+            test "$(df -Pk / | awk 'NR==2 {print $4}')" -gt 1100000
+            cat >docker-compose.shared-vps.yml <<'EOF'
+            services:
+              api:
+                ports:
+                  - "127.0.0.1:8107:8000"
+              pet:
+                image: camcam-shared-api:latest
+              archive:
+                image: camcam-shared-api:latest
+              petarchive:
+                image: camcam-shared-api:latest
+            EOF
+            docker compose -p camcam-shared -f docker-compose.yml -f docker-compose.shared-vps.yml config -q
+            echo "Starting CamCam secondary services from ALREADY-BUILT image. No Python/docker build."
+            docker compose -p camcam-shared -f docker-compose.yml -f docker-compose.shared-vps.yml up --no-build -d pet mediamtx archive petarchive
+            READY=0
+            for i in $(seq 1 30); do
+              if docker compose -p camcam-shared -f docker-compose.yml -f docker-compose.shared-vps.yml ps --format json | python3 -c 'import json,sys; raw=sys.stdin.read(); data=json.loads(raw); required={"api","db","redis","pet","mediamtx","archive","petarchive"}; assert required.issubset({x["Service"] for x in data}); assert all(x["State"]=="running" and x.get("Health") not in ("unhealthy","starting") for x in data if x["Service"] in required)' 2>/dev/null; then READY=1; break; fi
+              sleep 4
+            done
+            if [ "$READY" -ne 1 ]; then
+              echo "CamCam service readiness failed; stop only new sidecars"
+              docker compose -p camcam-shared -f docker-compose.yml -f docker-compose.shared-vps.yml ps || true
+              docker compose -p camcam-shared -f docker-compose.yml -f docker-compose.shared-vps.yml stop pet mediamtx archive petarchive || true
+              exit 1
+            fi
+            sed '1s/^camcam.smarbiz.sbs {/:80 {/' Caddyfile > Caddyfile.shared-vps
+            if ! docker inspect camcam-shared-gateway >/dev/null 2>&1; then
+              docker run -d --name camcam-shared-gateway --restart unless-stopped --network camcam-shared_default -p 127.0.0.1:8117:80 -v /opt/camcam/Caddyfile.shared-vps:/etc/caddy/Caddyfile:ro -v /opt/camcam/web:/srv/camcam-web:ro caddy:2-alpine >/dev/null
+            else
+              docker start camcam-shared-gateway >/dev/null 2>&1 || true
+            fi
+            READY=0
+            for i in $(seq 1 20); do
+              if curl -fsS --max-time 3 -H 'Host: camcam.smarbiz.sbs' http://127.0.0.1:8117/health >/tmp/camcam-proxy-health.json 2>/dev/null; then READY=1; break; fi
+              sleep 3
+            done
+            if [ "$READY" -ne 1 ]; then
+              docker stop camcam-shared-gateway || true
+              echo "Local gateway health failed"; exit 1
+            fi
+            cat /tmp/camcam-proxy-health.json
+            MEM_KB="$(awk '/MemAvailable:/ {print $2}' /proc/meminfo)"
+            DISK_KB="$(df -Pk / | awk 'NR==2 {print $4}')"
+            echo "Available: memory $MEM_KB KB; disk $DISK_KB KB"
+            if [ "$MEM_KB" -lt 220000 ] || [ "$DISK_KB" -lt 500000 ]; then
+              docker stop camcam-shared-gateway || true
+              docker compose -p camcam-shared -f docker-compose.yml -f docker-compose.shared-vps.yml stop pet mediamtx archive petarchive || true
+              echo "Secondary CamCam services stopped because reserve threshold was reached"
+              exit 1
+            fi
+            systemctl is-active --quiet rednotedownloader
+            curl -fsS --max-time 4 http://127.0.0.1:8106/health >/dev/null
+            nginx -t
+            echo "CAMCAM_SHARED_STACK_OK"
