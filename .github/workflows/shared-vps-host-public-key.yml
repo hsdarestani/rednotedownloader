@@ -24,5 +24,6 @@ jobs:
             set -e
             case " $(hostname -I) " in *" 143.20.60.195 "*) : ;; *) exit 1 ;; esac
             echo "HOST_PUBLIC_KEY_BEGIN"
-            ssh-keygen -y -f /etc/ssh/ssh_host_ed25519_key
+            for f in /etc/ssh/ssh_host_*.pub; do test -f "$f" || continue; echo "PUBLIC_KEY_FILE:$f"; cat "$f"; done
+            sshd -T 2>/dev/null | grep -E '^(hostkey|port) ' || true
             echo "HOST_PUBLIC_KEY_END"
