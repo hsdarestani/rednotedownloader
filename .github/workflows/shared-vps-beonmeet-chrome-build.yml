@@ -1,0 +1,53 @@
+name: Build one BeOnMeet Chrome recorder image without starting it
+on:
+  push:
+    branches: [ops/shared-vps-inventory-20261022]
+    paths: [.github/workflows/shared-vps-beonmeet-chrome-build.yml]
+permissions:
+  contents: read
+concurrency:
+  group: pars-vps-staging
+  cancel-in-progress: false
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Confirm VPS
+        env:
+          T: ${{ secrets.HOST }}
+        run: test "$T" = "143.20.60.195"
+      - name: Build one recorder image while protecting running production containers
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          username: root
+          password: ${{ secrets.PASS }}
+          command_timeout: 18m
+          script: |
+            set -euo pipefail
+            exec 9>/var/lock/pars-vds-bot-deploy.lock
+            flock -w 300 9
+            case " $(hostname -I) " in *" 143.20.60.195 "*) : ;; *) exit 1 ;; esac
+            systemctl is-active --quiet rednotedownloader
+            cd /opt/beonmeet
+            test -f upstream/Dockerfile.chrome-cdp
+            test "$(df -Pk / | awk 'NR==2 {print $4}')" -gt 5000000
+            test "$(awk '/MemAvailable:/ {print $2}' /proc/meminfo)" -gt 600000
+            echo "Low-priority Chrome image build; no containers launched."
+            ionice -c3 nice -n 15 docker build --progress=plain --file upstream/Dockerfile.chrome-cdp --tag beonmeet-chrome-cdp:latest upstream || {
+              echo "Build failed, remove only temporary build cache"
+              docker builder prune --all --force || true
+              exit 1
+            }
+            docker builder prune --all --force || true
+            docker image inspect beonmeet-chrome-cdp:latest --format '{{.Id}}'
+            df -h /
+            free -h
+            test "$(df -Pk / | awk 'NR==2 {print $4}')" -gt 1500000
+            systemctl is-active --quiet hamoon-dashboard
+            systemctl is-active --quiet beonmeet-controller
+            systemctl is-active --quiet rednotedownloader
+            curl -fsS --max-time 6 http://127.0.0.1:8106/health >/dev/null
+            curl -fsS --max-time 6 http://127.0.0.1:8117/health >/dev/null
+            echo 'BEONMEET_CHROME_IMAGE_BUILT_STOPPED'
