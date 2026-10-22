@@ -54,5 +54,13 @@ jobs:
             for d in /opt/rednotedownloader /opt/beonmeet /opt/camcam /opt/bebinkarato /opt/hamooncloud /opt/hamoon-private /root/apluscard; do
               if test -d "$d"; then echo "$d exists"; else echo "$d absent"; fi
             done
+            echo "## DNS resolution of existing public domains"
+            for name in camcam.smarbiz.sbs beonmeet.smarbiz.sbs pay.hamooncloud.ir hamooncloud.ir 5-161-144-101.sslip.io; do
+              printf '%s -> ' "$name"
+              getent ahostsv4 "$name" | awk '/STREAM/{print $1;exit}' || true
+            done
+            echo "## Nginx configuration and vhosts"
+            nginx -t 2>&1 | tail -3 || true
+            grep -Rh -E '^[[:space:]]*server_name ' /etc/nginx/sites-enabled 2>/dev/null | head -25 || true
             echo "## RedNote active check"
             systemctl is-active rednotedownloader || true
