@@ -31,6 +31,11 @@ jobs:
               printf 'probe %s: ' "$url"
               curl --max-time 3 -sS -o /dev/null -w '%{http_code}\n' "$url" || true
             done
+            echo 'CamCam internal gateway route health'
+            for route in / /pet /camera /health; do
+              printf 'CamCam %s: ' "$route"
+              curl --max-time 5 -sS -H 'Host: camcam.smarbiz.sbs' -o /dev/null -w '%{http_code} %{content_type}\n' "http://127.0.0.1:8117$route" || true
+            done
             echo 'TLS certificates available (public metadata only)'
             find /etc/letsencrypt/live -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null || true
             for f in /etc/letsencrypt/live/*/fullchain.pem; do
