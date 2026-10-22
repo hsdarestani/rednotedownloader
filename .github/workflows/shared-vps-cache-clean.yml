@@ -1,0 +1,40 @@
+name: Safe build-cache cleanup on shared VPS
+on:
+  push:
+    branches: [ops/shared-vps-inventory-20261022]
+    paths: [.github/workflows/shared-vps-cache-clean.yml]
+permissions:
+  contents: read
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify exact host
+        env:
+          HOST: ${{ secrets.HOST }}
+        run: test "$HOST" = "143.20.60.195"
+      - name: Prune build cache only, preserve volumes/images and services
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          username: root
+          password: ${{ secrets.PASS }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          command_timeout: 8m
+          script: |
+            set -euo pipefail
+            exec 9>/var/lock/pars-vds-bot-deploy.lock
+            flock -w 300 9
+            case " $(hostname -I) " in *" 143.20.60.195 "*) : ;; *) exit 1 ;; esac
+            echo "Before:"; df -h /; docker system df
+            echo "Pruning ONLY unused Docker build cache; NO images, containers, or volumes removed"
+            docker builder prune --all --force || true
+            docker buildx prune --all --force || true
+            apt-get clean || true
+            echo "After:"; df -h /; docker system df
+            echo "Core services:"
+            systemctl is-active rednotedownloader
+            curl -fsS --max-time 5 http://127.0.0.1:8106/health
+            curl -fsS --max-time 5 http://127.0.0.1:8107/health
+            nginx -t
+            echo "CACHE_CLEAN_OK"
