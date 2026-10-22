@@ -62,5 +62,11 @@ jobs:
             echo "## Nginx configuration and vhosts"
             nginx -t 2>&1 | tail -3 || true
             grep -Rh -E '^[[:space:]]*server_name ' /etc/nginx/sites-enabled 2>/dev/null | head -25 || true
+            echo "## Image inventory (refs, sizes and created age)"
+            docker image ls --format '{{.ID}} | {{.Repository}}:{{.Tag}} | {{.Size}} | {{.CreatedSince}}' | head -45 || true
+            echo "## Container image references"
+            docker ps -a --format '{{.Names}} | {{.Image}}' || true
+            echo "## File system directories at /var"
+            du -sh /var/lib/docker /var/log /opt 2>/dev/null || true
             echo "## RedNote active check"
             systemctl is-active rednotedownloader || true
