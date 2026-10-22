@@ -72,7 +72,13 @@ jobs:
             nginx -t
             systemctl reload nginx
             for DOMAIN in camcam.smarbiz.sbs beonmeet.smarbiz.sbs bebinkarato.smarbiz.sbs pay.hamooncloud.ir; do
-              CODE="$(curl -s -H "Host: $DOMAIN" -o /dev/null -w '%{http_code}' http://127.0.0.1/)"
+              CODE=000
+              for ATTEMPT in $(seq 1 12); do
+                CODE="$(curl -sS --max-time 2 -H "Host: $DOMAIN" -o /dev/null -w '%{http_code}' http://127.0.0.1/ || true)"
+                if [ "$CODE" = 503 ]; then break; fi
+                sleep 1
+              done
+              echo "$DOMAIN HTTP_STATUS=$CODE"
               test "$CODE" = 503
               echo "$DOMAIN ACME_ONLY_HTTP_503"
             done
