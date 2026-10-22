@@ -1,0 +1,71 @@
+name: Prepare remaining TLS reverse-proxy release files
+on:
+  push:
+    branches: [ops/shared-vps-inventory-20261022]
+    paths: [.github/workflows/shared-vps-proxy-all.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check destination
+        env:
+          H: ${{ secrets.HOST }}
+        run: test "$H" = "143.20.60.195"
+      - name: Prepare HTTPS-only proxy templates, do not publish without certificates
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          username: root
+          password: ${{ secrets.PASS }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          command_timeout: 3m
+          script: |
+            set -euo pipefail
+            case " $(hostname -I) " in *" 143.20.60.195 "*) : ;; *) exit 1 ;; esac
+            install -d -m 0750 /opt/shared-vps-staging/proxy-templates
+            cat > /opt/shared-vps-staging/proxy-templates/beonmeet.smarbiz.sbs.conf <<'EOF'
+            # Disabled until the HTTPS certificate exists.
+            server {
+              listen 80;
+              server_name beonmeet.smarbiz.sbs;
+              location / {
+                proxy_pass http://127.0.0.1:8109;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+                proxy_http_version 1.1;
+                proxy_set_header Upgrade $http_upgrade;
+                proxy_set_header Connection "upgrade";
+                proxy_read_timeout 300s;
+              }
+            }
+            EOF
+            cat > /opt/shared-vps-staging/proxy-templates/pay.hamooncloud.ir.conf <<'EOF'
+            # Disabled until the HTTPS certificate exists.
+            server {
+              listen 80;
+              server_name pay.hamooncloud.ir;
+              location / {
+                proxy_pass http://127.0.0.1:8108;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+                proxy_http_version 1.1;
+                proxy_set_header Upgrade $http_upgrade;
+                proxy_set_header Connection "upgrade";
+                proxy_read_timeout 300s;
+              }
+            }
+            EOF
+            echo 'Prepared four HTTP vhost source files for later TLS onboarding, not enabled.'
+            ls /opt/shared-vps-staging/proxy-templates
+            nginx -t
+            for url in http://127.0.0.1:8106/health http://127.0.0.1:8117/health http://127.0.0.1:8108/health http://127.0.0.1:8109/health; do
+              curl -fsS --max-time 5 "$url" >/dev/null
+            done
+            systemctl is-active --quiet rednotedownloader
+            echo 'ALL_FOUR_INTERNAL_ENDPOINTS_OK_PROXY_TEMPLATE_READY'
