@@ -1,0 +1,43 @@
+name: Recover disk after failed CamCam multi-image build
+on:
+  push:
+    branches: [ops/shared-vps-inventory-20261022]
+    paths: [.github/workflows/shared-vps-recover-space.yml]
+permissions:
+  contents: read
+concurrency:
+  group: pars-vps-staging
+  cancel-in-progress: false
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ensure target
+        env:
+          H: ${{ secrets.HOST }}
+        run: test "$H" = "143.20.60.195"
+      - name: Recover only unused build cache; preserve data and running containers
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          username: root
+          password: ${{ secrets.PASS }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          command_timeout: 7m
+          script: |
+            set -euo pipefail
+            exec 9>/var/lock/pars-vds-bot-deploy.lock
+            flock -w 300 9
+            case " $(hostname -I) " in *" 143.20.60.195 "*) : ;; *) exit 1 ;; esac
+            echo "Before recovery"; df -h /
+            docker builder prune --all --force || true
+            docker buildx prune --all --force || true
+            apt-get clean || true
+            echo "After build cache cleanup"; df -h /
+            echo "Current container/service states"
+            docker ps --format '{{.Names}} {{.Status}}'
+            systemctl is-active rednotedownloader || true
+            curl --max-time 5 -fsS http://127.0.0.1:8106/health || true
+            curl --max-time 5 -fsS http://127.0.0.1:8107/health || true
+            echo "Disk details"; docker system df
+            echo "RECOVERY_FINISHED"
