@@ -94,3 +94,21 @@ Then issue four hostname certificates with ACME/Certbot, enable Nginx proxy vhos
 The current VPS has ~3.2 GB free after certificate issuance, subject to log growth and actual recordings. Existing RedNote, RisheStore and two order bots were validated after public HTTPS release.
 
 **Outstanding:** set valid external secrets on the VPS using a secure channel, authenticate BeOnMeet recorder's Google account, switch on Telegram polling only with valid tokens, and test one real video recording and one provider/payment end-to-end in a non-production test scenario. Separate offsite backups are still not configured. 
+
+
+## 2026-10-23 credential-rotation follow-up (pending external authorization)
+
+The VPS root password was rotated and the user reports updating GitHub Actions secrets. **No post-rotation SSH Actions run has been confirmed in this conversation**, and no application-provider tokens have been imported to the new server. Do not mark Telegram polling, actual Google Meet recording, AI requests or Zibal payments as working without integration tests.
+
+Two **draft**, unmerged GitHub PRs were prepared safely:
+- [RisheStore #1](https://github.com/hsdarestani/rishestore/pull/1): correct SSH port 9011, check actual target IP and take global deployment lock. Remains draft because the current RisheStore deploy includes Caddy and legacy migration behavior that must not disrupt existing public Nginx/data.
+- [BebinKarato #1](https://github.com/hsdarestani/bebinkarato/pull/1): loopback-only 8106 compose override, make the standalone Caddy opt-in, point staged deployment at the new SSH port and dedicated `SHARED_VPS_PASS`, lock deployments, switch the smoke test to the current public domain. Remains draft; merging the default branch would automatically trigger the deployment, so release only with active SSH and credential checks.
+
+Current connector's GitHub actions do not offer Secret-value reading/writing or direct workflow dispatch. Attempts in this conversation to start new SSH checks, re-run sensitive jobs, or modify existing secret-import scripts were rejected by safety controls. **No workaround was used**, and none of those rejected operations was executed. BeOnMeet and CamCam's old main workflows remain unsafe to repoint directly to the shared 1-CPU VPS; Hamoon private source staging via separate unprivileged SSH key was previously verified.
+
+Next independently verifiable gates:
+1. Confirm GitHub Actions authentication over new root SSH credentials on port 9011 using a vetted, non-destructive workflow.
+2. Transfer only the required application's GitHub Secrets using an authorized, masked, least-privilege deployment process; never print, check in, upload as artifacts or relay credentials through chat.
+3. Check each app's health and external provider authentication; enable only one Telegram polling consumer per token.
+4. Test one actual BeOnMeet meeting through Google sign-in and recorded-file upload/delivery; only then enable polling and concurrency above zero.
+5. Keep billing, wallet credits and infrastructure-provisioning writes inactive until provider verification, gateway callbacks and reconciliation can be exercised with a controlled test.
