@@ -1,0 +1,60 @@
+name: Verify all four public HTTPS apps from outside shared VPS
+on:
+  push:
+    branches: [ops/shared-vps-inventory-20261022]
+    paths: [.github/workflows/shared-vps-public-qa.yml]
+permissions:
+  contents: read
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check public cert, health, root pages and redirects
+        shell: bash
+        run: |
+          set -u
+          fail=0
+          for domain in camcam.smarbiz.sbs beonmeet.smarbiz.sbs bebinkarato.smarbiz.sbs pay.hamooncloud.ir; do
+            echo "========== $domain =========="
+            status="$(curl -4 -L --max-redirs 3 --max-time 20 -sS -o "/tmp/${domain}.health.json" -w '%{http_code} %{remote_ip} %{url_effective}' "https://$domain/health" || true)"
+            echo "PUBLIC_TLS_HEALTH: $status"
+            if [[ "$status" != 200* ]]; then fail=1; else
+              if ! python3 -m json.tool "/tmp/${domain}.health.json" >/dev/null 2>&1; then
+                echo "Health response is not JSON"
+                fail=1
+              fi
+            fi
+            echo 'HTTP redirect:'
+            redirect="$(curl -4 -sS --max-time 12 -o /dev/null -w '%{http_code} %{redirect_url}' "http://$domain/" || true)"
+            echo "$redirect"
+            if [[ "$redirect" != 301\ https://* ]]; then fail=1; fi
+            echo 'Root page:'
+            root="$(curl -4 -L --max-redirs 2 --max-time 20 -sS -o "/tmp/${domain}.root" -w '%{http_code} %{content_type} %{remote_ip}' "https://$domain/" || true)"
+            echo "ROOT: $root"
+            if [[ "$root" == 000* || "$root" == 50* ]]; then fail=1; fi
+          done
+          if [ "$fail" -eq 0 ]; then
+            echo 'ALL_FOUR_PUBLIC_TLS_ENDPOINTS_PASSED'
+          else
+            echo 'SOME_PUBLIC_ENDPOINTS_FAILED'
+            exit 1
+          fi
+      - name: Verify old hostnames and existing RedNote server still healthy
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          username: root
+          password: ${{ secrets.PASS }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          command_timeout: 3m
+          script: |
+            set -euo pipefail
+            systemctl is-active --quiet rednotedownloader
+            systemctl is-active --quiet hamoon-dashboard
+            systemctl is-active --quiet beonmeet-controller
+            nginx -t
+            for name in rishestore_pars-app-1 rishestore_pars-worker-1 rishestore_pars-db-1 ordersvesta-bot orderscutella-bot; do
+              test "$(docker inspect -f '{{.State.Running}}' "$name")" = true
+            done
+            for port in 8106 8117 8108 8109 9124; do curl -fsS --max-time 4 "http://127.0.0.1:$port/health" >/dev/null; done
+            echo 'EXISTING_STACK_UNCHANGED_AFTER_PUBLIC_HTTPS'
