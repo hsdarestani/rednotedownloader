@@ -1,0 +1,48 @@
+name: Diagnose DNS and public ACME reachability for four shared VPS apps
+on:
+  push:
+    branches: [ops/shared-vps-inventory-20261022]
+    paths: [.github/workflows/shared-vps-dns-verify.yml]
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check public DNS resolvers and HTTP challenge path
+        shell: bash
+        run: |
+          set -u
+          for domain in camcam.smarbiz.sbs beonmeet.smarbiz.sbs bebinkarato.smarbiz.sbs pay.hamooncloud.ir; do
+            echo "========== $domain =========="
+            echo "Cloudflare A:"
+            dig +short +time=3 +tries=1 @1.1.1.1 "$domain" A || true
+            echo "Google A:"
+            dig +short +time=3 +tries=1 @8.8.8.8 "$domain" A || true
+            echo "AAAA:"
+            dig +short +time=3 +tries=1 @1.1.1.1 "$domain" AAAA || true
+            echo "HTTP observed (ordinary internet):"
+            curl --silent --show-error --location --max-redirs 1 --connect-timeout 4 --max-time 8 -o /dev/null -w 'http_status=%{http_code} remote_ip=%{remote_ip}\n' "http://$domain/.well-known/acme-challenge/__shared_vps_diagnostic__" || true
+          done
+      - name: Confirm target VPS ACME Nginx and existing applications
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          username: root
+          password: ${{ secrets.PASS }}
+          command_timeout: 3m
+          script: |
+            set -eu
+            case " $(hostname -I) " in *" 143.20.60.195 "*) : ;; *) exit 1 ;; esac
+            for domain in camcam.smarbiz.sbs beonmeet.smarbiz.sbs bebinkarato.smarbiz.sbs pay.hamooncloud.ir; do
+              echo "========== $domain =========="
+              getent ahostsv4 "$domain" | awk '{print $1}' | sort -u || true
+              curl -sS --max-time 3 -H "Host: $domain" -o /dev/null -w 'local_nginx_http=%{http_code}\n' http://127.0.0.1/ || true
+            done
+            nginx -t
+            for port in 8106 8117 8108 8109 9124; do
+              curl -fsS --max-time 4 "http://127.0.0.1:$port/health" >/dev/null
+              echo "LOOPBACK:$port OK"
+            done
+            systemctl is-active --quiet rednotedownloader
