@@ -39,6 +39,33 @@ jobs:
             echo 'SOME_PUBLIC_ENDPOINTS_FAILED'
             exit 1
           fi
+      - name: Verify OAuth redirect and rejected unauthenticated APIs without signing in
+        run: |
+          python3 - <<'PY'
+          import urllib.request,urllib.error,urllib.parse
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self,*args,**kwargs):return None
+          client=urllib.request.build_opener(NoRedirect)
+          def fetch(url):
+              try:
+                  r=client.open(url,timeout=20)
+                  return r.status,r.headers
+              except urllib.error.HTTPError as e:return e.code,e.headers
+          status,headers=fetch("https://beonmeet.smarbiz.sbs/auth/google")
+          assert status in (302,303,307)
+          target=urllib.parse.urlparse(headers["Location"])
+          assert target.hostname=="accounts.google.com"
+          query=urllib.parse.parse_qs(target.query)
+          assert query["redirect_uri"]==["https://beonmeet.smarbiz.sbs/auth/google/callback"]
+          assert query.get("client_id") and query.get("state")
+          print("BEONMEET_PUBLIC_GOOGLE_AUTH_REDIRECT_OK")
+          status,_=fetch("https://beonmeet.smarbiz.sbs/auth/google/callback?state=deployment-qa-invalid")
+          assert status==400
+          for url in ["https://pay.hamooncloud.ir/api/v1/me","https://camcam.smarbiz.sbs/api/me","https://camcam.smarbiz.sbs/api/admin/overview","https://bebinkarato.smarbiz.sbs/admin"]:
+              status,_=fetch(url)
+              assert status in (401,403)
+          print("PUBLIC_AUTHORIZATION_AND_INVALID_OAUTH_STATE_GUARDS_OK")
+          PY
       - name: Verify old hostnames and existing RedNote server still healthy
         uses: appleboy/ssh-action@v1
         with:
