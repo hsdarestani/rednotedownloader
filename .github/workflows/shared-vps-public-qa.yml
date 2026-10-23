@@ -58,3 +58,5 @@ jobs:
             done
             for port in 8106 8117 8108 8109 9124; do curl -fsS --max-time 4 "http://127.0.0.1:$port/health" >/dev/null; done
             echo 'EXISTING_STACK_UNCHANGED_AFTER_PUBLIC_HTTPS'
+
+# Verify public HTTPS again after integration activation and restart recovery.
