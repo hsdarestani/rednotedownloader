@@ -1,0 +1,56 @@
+name: Verify live backups by restoring into isolated disposable databases
+on:
+  push:
+    branches: [ops/shared-vps-inventory-20261022]
+    paths: [.github/workflows/shared-vps-backup-restore-qa.yml]
+permissions:
+  contents: read
+jobs:
+  restore:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: appleboy/ssh-action@v1
+        with:
+          host: 143.20.60.195
+          port: 9011
+          username: root
+          password: ${{ secrets.PASS }}
+          command_timeout: 5m
+          script: |
+            set -euo pipefail
+            umask 077
+            case " $(hostname -I) " in *" 143.20.60.195 "*) : ;; *) exit 1 ;; esac
+            exec 9>/var/lock/pars-vds-bot-deploy.lock
+            flock -w 300 9
+            systemctl start shared-vps-backup.service
+            systemctl is-enabled shared-vps-backup.timer
+            LAST="$(find /var/backups/shared-vps-apps -maxdepth 1 -name '*.tar.gz' | sort | tail -1)"
+            test -s "$LAST"
+            WORK="$(mktemp -d /var/backups/shared-vps-apps/.restore-qa-XXXX)"
+            trap 'rm -rf "$WORK"' EXIT
+            tar -xzf "$LAST" -C "$WORK"
+            python3 - "$WORK" <<'PY'
+            import sys,sqlite3
+            from pathlib import Path
+            for f in Path(sys.argv[1]).glob("*.db"):
+                c=sqlite3.connect(str(f))
+                assert c.execute("PRAGMA integrity_check").fetchone()[0]=="ok"
+                assert c.execute("SELECT count(*) FROM sqlite_master WHERE type='table'").fetchone()[0]>0
+                c.close()
+                print("SQLITE_RESTORE_INTEGRITY_OK",f.name)
+            PY
+            QA="deployment_restore_$(date -u +%Y%m%d%H%M%S)"
+            docker exec camcam-shared-db-1 createdb -U camcam "$QA"
+            gzip -dc "$WORK/camcam-postgresql.sql.gz" | docker exec -i camcam-shared-db-1 psql -v ON_ERROR_STOP=1 -U camcam -d "$QA" > "$WORK/postgres-restore.log" 2>&1
+            test "$(docker exec camcam-shared-db-1 psql -U camcam -d "$QA" -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public'")" -gt 0
+            docker exec camcam-shared-db-1 dropdb -U camcam "$QA"
+            echo POSTGRES_RESTORE_INTO_DISPOSABLE_DATABASE_OK
+            mariadb -e "CREATE DATABASE $QA;"
+            gzip -dc "$WORK/hamoon-mariadb.sql.gz" | mariadb "$QA" > "$WORK/mariadb-restore.log" 2>&1
+            test "$(mariadb -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='$QA';")" -gt 0
+            mariadb -e "DROP DATABASE $QA;"
+            echo MARIA_DB_RESTORE_INTO_DISPOSABLE_DATABASE_OK
+            for s in rednotedownloader hamoon-dashboard beonmeet-controller; do systemctl is-active --quiet "$s"; done
+            nginx -t
+            echo ALL_DATABASE_BACKUP_RESTORE_QA_PASSED
+            
