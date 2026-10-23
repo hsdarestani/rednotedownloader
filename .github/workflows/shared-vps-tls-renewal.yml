@@ -1,0 +1,47 @@
+name: Verify cert renewal and install safe Nginx reload hook
+on:
+  push:
+    branches: [ops/shared-vps-inventory-20261022]
+    paths: [.github/workflows/shared-vps-tls-renewal.yml]
+permissions:
+  contents: read
+jobs:
+  renew:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify host
+        env:
+          H: ${{ secrets.HOST }}
+        run: test "$H" = "143.20.60.195"
+      - name: Configure only Nginx reload hook, test staging renewals
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          username: root
+          password: ${{ secrets.PASS }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          command_timeout: 16m
+          script: |
+            set -euo pipefail
+            case " $(hostname -I) " in *" 143.20.60.195 "*) : ;; *) exit 1 ;; esac
+            install -d -m 0755 /etc/letsencrypt/renewal-hooks/deploy
+            cat >/etc/letsencrypt/renewal-hooks/deploy/shared-vps-reload-nginx <<'EOF'
+            #!/usr/bin/env bash
+            set -euo pipefail
+            /usr/sbin/nginx -t
+            /bin/systemctl reload nginx
+            EOF
+            chmod 750 /etc/letsencrypt/renewal-hooks/deploy/shared-vps-reload-nginx
+            nginx -t
+            systemctl is-enabled certbot.timer || true
+            systemctl is-active certbot.timer || true
+            certbot renew --dry-run --no-random-sleep-on-renew --non-interactive
+            echo 'CERTBOT_DRY_RUN_OK'
+            systemctl is-active --quiet rednotedownloader
+            systemctl is-active --quiet hamoon-dashboard
+            systemctl is-active --quiet beonmeet-controller
+            curl -fsS --max-time 5 http://127.0.0.1:8106/health >/dev/null
+            curl -fsS --max-time 5 http://127.0.0.1:8117/health >/dev/null
+            curl -fsS --max-time 5 http://127.0.0.1:8109/health >/dev/null
+            nginx -t
+            echo 'CERT_RENEWAL_AND_SAFE_NGINX_RELOAD_READY'
