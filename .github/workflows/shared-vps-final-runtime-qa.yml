@@ -1,0 +1,105 @@
+name: Final restart isolation and resource monitoring acceptance
+on:
+  push:
+    branches: [ops/shared-vps-inventory-20261022]
+    paths: [.github/workflows/shared-vps-final-runtime-qa.yml]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: appleboy/ssh-action@v1
+        with:
+          host: 143.20.60.195
+          port: 9011
+          username: root
+          password: ${{ secrets.PASS }}
+          command_timeout: 8m
+          script: |
+            set -eu
+            umask 077
+            case " $(hostname -I) " in *" 143.20.60.195 "*) : ;; *) exit 1 ;; esac
+            exec 9>/var/lock/pars-vds-bot-deploy.lock
+            flock -w 600 9
+            # The source owner may restart only its own unprivileged service.
+            test "$(systemctl show -p User --value hamoon-dashboard.service)" = hamoondeploy
+            printf 'hamoondeploy ALL=(root) NOPASSWD: /usr/bin/systemctl restart hamoon-dashboard.service\n' > /etc/sudoers.d/hamoon-dashboard-restart
+            chmod 440 /etc/sudoers.d/hamoon-dashboard-restart
+            visudo -cf /etc/sudoers.d/hamoon-dashboard-restart
+            echo HAMOON_EXACT_SERVICE_RESTART_PERMISSION_READY
+            install -d -m 0700 /opt/shared-vps-staging
+            cat >/usr/local/sbin/shared-vps-resource-check <<'SH'
+            #!/bin/sh
+            disk=$(df -P / | awk 'NR==2 {gsub(/%/,"",$5);print $5}')
+            available=$(awk '/MemAvailable:/ {print $2}' /proc/meminfo)
+            if [ "$disk" -ge 90 ] || [ "$available" -lt 180000 ]; then
+              logger -p daemon.warning -t shared-vps-resources "Resource reserve low: root_disk_percent=$disk available_memory_kib=$available"
+              exit 1
+            fi
+            SH
+            chmod 700 /usr/local/sbin/shared-vps-resource-check
+            cat >/etc/systemd/system/shared-vps-resource-check.service <<'UNIT'
+            [Unit]
+            Description=Check shared VPS disk and available memory
+            [Service]
+            Type=oneshot
+            ExecStart=/usr/local/sbin/shared-vps-resource-check
+            Nice=15
+            UNIT
+            cat >/etc/systemd/system/shared-vps-resource-check.timer <<'UNIT'
+            [Unit]
+            Description=Shared VPS resource reserve check
+            [Timer]
+            OnBootSec=3m
+            OnUnitActiveSec=5m
+            [Install]
+            WantedBy=timers.target
+            UNIT
+            systemctl daemon-reload
+            systemctl enable --now shared-vps-resource-check.timer
+            systemctl start shared-vps-resource-check.service
+            python3 - <<'PY'
+            from pathlib import Path
+            import stat
+            for name in ["/opt/camcam/.env","/opt/beonmeet/.env","/opt/bebinkarato/app/.env","/home/hamoondeploy/hamoon-source/.env"]:
+                mode=stat.S_IMODE(Path(name).stat().st_mode)
+                assert mode & 0o077==0,"Runtime environment permissions too broad"
+            print("ALL_ENV_FILES_PRIVATE")
+            PY
+            # Sequential restart rehearsals; databases and recorder Chrome/worker remain intact.
+            docker restart bebinkarato >/dev/null
+            for i in $(seq 1 30); do if curl -fsS --max-time 3 http://127.0.0.1:8106/health >/dev/null;then break;fi;sleep 2;done
+            curl -fsS --max-time 5 http://127.0.0.1:8106/health >/dev/null
+            docker restart camcam-shared-api-1 >/dev/null
+            for i in $(seq 1 30); do if curl -fsS --max-time 3 http://127.0.0.1:8107/health >/dev/null;then break;fi;sleep 2;done
+            curl -fsS --max-time 5 http://127.0.0.1:8107/health >/dev/null
+            systemctl restart beonmeet-controller
+            systemctl restart hamoon-dashboard
+            for i in $(seq 1 30); do if curl -fsS --max-time 3 http://127.0.0.1:8109/health >/dev/null && curl -fsS --max-time 3 http://127.0.0.1:8108/health >/dev/null;then break;fi;sleep 2;done
+            for port in 8106 8107 8108 8109 8117;do curl -fsS --max-time 6 "http://127.0.0.1:$port/health" >/dev/null;done
+            echo FOUR_APPLICATION_RESTART_RECOVERY_OK
+            /opt/beonmeet/.venv/bin/python - <<'PY'
+            from pathlib import Path
+            import urllib.request,json,urllib.parse
+            values=dict(l.split("=",1) for l in Path("/opt/beonmeet/.env").read_text().splitlines() if "=" in l and not l.startswith("#"))
+            token=values.get("TELEGRAM_BOT_TOKEN")
+            try:
+                with urllib.request.urlopen("https://api.telegram.org/bot"+token+"/getMe",timeout=20) as r:assert json.load(r).get("ok")
+            except Exception:
+                print("BEONMEET_TELEGRAM_AUTH_FAILED");raise SystemExit(1)
+            assert values["GOOGLE_REDIRECT_URI"]=="https://beonmeet.smarbiz.sbs/auth/google/callback"
+            assert values.get("BEONMEET_STAGING_NO_POLL")=="1"
+            assert values.get("AUTOSCALE_ENABLED")=="false"
+            assert values.get("FREE_MEETING_SLOTS")=="0"
+            print("BEONMEET_TELEGRAM_VALID_REDIRECT_CONFIGURED_QUEUE_CLOSED")
+            print("BEONMEET_CALENDAR_CONSENT_PRESENT",Path("/opt/beonmeet/data/google-token.json").exists())
+            PY
+            for service in rednotedownloader hamoon-dashboard beonmeet-controller beonmeet-docker-bridge shared-vps-backup.timer shared-vps-resource-check.timer;do systemctl is-active --quiet "$service";systemctl is-enabled "$service";done
+            for name in rishestore_pars-app-1 rishestore_pars-worker-1 rishestore_pars-db-1 ordersvesta-bot orderscutella-bot beonmeet-worker-single beonmeet-chrome-single;do test "$(docker inspect -f '{{.State.Running}}' "$name")" = true;done
+            ss -lnt | awk 'NR==1 || /:(8106|8107|8108|8109|9123|9124|9125|6081) /'
+            nginx -t
+            df -h /
+            free -h
+            echo FINAL_RESTART_LEGACY_ISOLATION_AND_MONITORING_QA_OK
+            
