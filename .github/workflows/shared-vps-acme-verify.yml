@@ -1,0 +1,44 @@
+name: Verify public ACME challenge reaches this VPS for all four hostnames
+on:
+  push:
+    branches: [ops/shared-vps-inventory-20261022]
+    paths: [.github/workflows/shared-vps-acme-verify.yml]
+permissions:
+  contents: read
+jobs:
+  acme:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Put a public non-secret ACME reachability marker on the target VPS
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          username: root
+          password: ${{ secrets.PASS }}
+          command_timeout: 3m
+          script: |
+            set -euo pipefail
+            case " $(hostname -I) " in *" 143.20.60.195 "*) : ;; *) exit 1 ;; esac
+            TARGET=/var/www/shared-vps-acme/.well-known/acme-challenge/vps-routing-proof-20261023-a19c
+            echo 'shared-vps-routing-verified-20261023-a19c' >"$TARGET"
+            chmod 644 "$TARGET"
+            for domain in camcam.smarbiz.sbs beonmeet.smarbiz.sbs bebinkarato.smarbiz.sbs pay.hamooncloud.ir; do
+              test "$(curl -fsS -H "Host: $domain" http://127.0.0.1/.well-known/acme-challenge/vps-routing-proof-20261023-a19c)" = "shared-vps-routing-verified-20261023-a19c"
+            done
+            echo 'LOCAL_FOUR_DOMAIN_CHALLENGE_SUCCESS'
+      - name: Confirm exactly the same file reaches the public Internet
+        shell: bash
+        run: |
+          set -u
+          for domain in camcam.smarbiz.sbs beonmeet.smarbiz.sbs bebinkarato.smarbiz.sbs pay.hamooncloud.ir; do
+            echo "==== $domain ===="
+            url="http://$domain/.well-known/acme-challenge/vps-routing-proof-20261023-a19c"
+            body=$(curl -4 -L --max-redirs 2 --connect-timeout 5 --max-time 15 -sS -w $'\nHTTP_METADATA:%{http_code} %{remote_ip} %{url_effective}' "$url" || true)
+            echo "${body##*HTTP_METADATA:}"
+            if [[ "$body" == *"shared-vps-routing-verified-20261023-a19c"* ]]; then
+              echo "PUBLIC_ORIGIN_ACME_OK:$domain"
+            else
+              echo "PUBLIC_ORIGIN_ACME_MISSING:$domain"
+            fi
+          done
