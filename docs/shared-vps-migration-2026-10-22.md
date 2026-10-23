@@ -18,7 +18,7 @@ This section supersedes the historical migration notes below. **The four-project
 - [BebinKarato successful deployment after merged PR](https://github.com/hsdarestani/bebinkarato/actions/runs/39986645409)
 - [Real BebinKarato AI parsing/report smoke, isolated reminder and real CamCam/Firebase provider checks](https://github.com/hsdarestani/rednotedownloader/actions/runs/39960454712)
 - [CamCam secure integration activation](https://github.com/hsdarestani/cacmcam/actions/runs/39959129888)
-- [CamCam real synthetic camera recording and archive acceptance](https://github.com/hsdarestani/cacmcam/actions/runs/39986423381)
+- [CamCam real synthetic camera recording and archive acceptance](https://github.com/hsdarestani/cacmcam/actions/runs/39988543898)
 - [CamCam independent shared-VPS deploy](https://github.com/hsdarestani/cacmcam/actions/runs/39986735498)
 - [Mocked-provider payment concurrency and amount checks on disposable PostgreSQL: 4 tests passed](https://github.com/hsdarestani/cacmcam/actions/runs/39987641093)
 - [BeOnMeet credentials imported without opening queue](https://github.com/hsdarestani/beonmeet/actions/runs/39959754038)
