@@ -47,3 +47,5 @@ jobs:
             grep -Rh 'server_name' /etc/nginx/sites-enabled 2>/dev/null | head -25 || true
             systemctl is-active rednotedownloader
             nginx -t
+
+# Recheck read-only inventory after SSH credential rotation, 2026-10-23.
