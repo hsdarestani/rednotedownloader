@@ -1,0 +1,77 @@
+name: Real AI provider and application functional verification
+on:
+  push:
+    branches: [ops/shared-vps-inventory-20261022]
+    paths: [.github/workflows/shared-vps-functional-qa.yml]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: appleboy/ssh-action@v1
+        with:
+          host: 143.20.60.195
+          port: 9011
+          username: root
+          password: ${{ secrets.PASS }}
+          command_timeout: 12m
+          script: |
+            set -eu
+            case " $(hostname -I) " in *" 143.20.60.195 "*) : ;; *) exit 1 ;; esac
+            docker exec -i bebinkarato python - <<'PY'
+            import os,tempfile,asyncio
+            from pathlib import Path
+            from datetime import datetime,timedelta,timezone
+            with tempfile.TemporaryDirectory() as td:
+                os.environ["DATABASE_URL"]="sqlite:///"+td+"/qa.db"
+                from app.db import init_db,SessionLocal
+                from app.models import User,Task
+                from app.reminders import reminder_loop
+                init_db()
+                with SessionLocal() as db:
+                    u=User(telegram_id=1,first_name="Synthetic QA")
+                    db.add(u);db.flush()
+                    t=Task(user_id=u.id,batch_id="qa",title="Synthetic reminder",status="todo",reminder_at=(datetime.now(timezone.utc)-timedelta(minutes=1)).isoformat())
+                    db.add(t);db.commit();tid=t.id
+                stop=asyncio.Event()
+                class FakeBot:
+                    calls=0
+                    async def send_message(self,chat_id,text):
+                        assert chat_id==1 and "Synthetic reminder" in text
+                        self.calls+=1;stop.set()
+                bot=FakeBot()
+                asyncio.run(reminder_loop(bot,stop))
+                with SessionLocal() as db: assert db.get(Task,tid).reminder_sent
+                assert bot.calls==1
+                print("ISOLATED_TASK_DATABASE_AND_REMINDER_DISPATCH_OK")
+            PY
+            timeout 420 docker exec bebinkarato python scripts/smoke.py
+            echo BEBINKARATO_REAL_AI_PARSING_AND_REPORT_SMOKE_OK
+            docker exec -i camcam-shared-pet-1 python - <<'PY'
+            import os,json,base64,asyncio
+            import httpx
+            async def main():
+                async with httpx.AsyncClient(timeout=60) as c:
+                    r=await c.post("https://api.cloudflare.com/client/v4/accounts/"+os.environ["CLOUDFLARE_ACCOUNT_ID"]+"/ai/run/@cf/meta/llama-3.1-8b-instruct-fast",headers={"Authorization":"Bearer "+os.environ["CLOUDFLARE_AI_TOKEN"]},json={"messages":[{"role":"user","content":"Reply OK"}],"max_tokens":8})
+                    assert r.status_code==200 and r.json().get("success"), "CLOUDFLARE_HTTP_"+str(r.status_code)
+                    print("CAMCAM_REAL_CLOUDFLARE_INFERENCE_OK")
+                from google.oauth2 import service_account
+                from google.auth.transport.requests import Request
+                info=json.loads(base64.b64decode(os.environ["FIREBASE_SERVICE_ACCOUNT_B64"]))
+                credentials=service_account.Credentials.from_service_account_info(info,scopes=["https://www.googleapis.com/auth/firebase.messaging"])
+                credentials.refresh(Request())
+                assert credentials.valid
+                print("FIREBASE_SERVICE_ACCOUNT_GOOGLE_OAUTH_VALID")
+            try:
+                asyncio.run(main())
+            except Exception as e:
+                print("PROVIDER_QA_FAILED",type(e).__name__)
+                raise SystemExit(1)
+            PY
+            for port in 8106 8107 8108 8109 8117; do curl -fsS --max-time 6 "http://127.0.0.1:$port/health" >/dev/null; done
+            for name in rishestore_pars-app-1 rishestore_pars-worker-1 rishestore_pars-db-1 ordersvesta-bot orderscutella-bot; do test "$(docker inspect -f '{{.State.Running}}' "$name")" = true; done
+            systemctl is-active --quiet rednotedownloader
+            nginx -t
+            echo EXISTING_SERVICES_PRESERVED
+            
