@@ -87,3 +87,5 @@ jobs:
             echo 'EXISTING_STACK_UNCHANGED_AFTER_PUBLIC_HTTPS'
 
 # Verify public HTTPS again after integration activation and restart recovery.
+
+# Final public acceptance after production image 6b05427.
