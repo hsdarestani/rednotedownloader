@@ -1,0 +1,52 @@
+name: Check external integration readiness without reading secret values
+on:
+  push:
+    branches: [ops/shared-vps-inventory-20261022]
+    paths: [.github/workflows/shared-vps-integration-readiness.yml]
+permissions:
+  contents: read
+jobs:
+  status:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate host
+        env:
+          EXPECTED: ${{ secrets.HOST }}
+        run: test "$EXPECTED" = "143.20.60.195"
+      - name: Report configured vs missing integrations only
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          username: root
+          password: ${{ secrets.PASS }}
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          command_timeout: 3m
+          script: |
+            set -eu
+            case " $(hostname -I) " in *" 143.20.60.195 "*) : ;; *) exit 1 ;; esac
+            python3 - <<'PY'
+            from pathlib import Path
+            groups={
+              'BebinKarato':('/opt/bebinkarato/app/.env',['TELEGRAM_BOT_TOKEN','CLOUDFLARE_API_TOKEN','CLOUDFLARE_ACCOUNT_ID']),
+              'CamCam':('/opt/camcam/.env',['CLOUDFLARE_AI_TOKEN','CLOUDFLARE_ACCOUNT_ID','FIREBASE_SERVICE_ACCOUNT_B64','ZIBAL_MERCHANT']),
+              'BeOnMeet':('/opt/beonmeet/.env',['GOOGLE_CLIENT_ID','GOOGLE_CLIENT_SECRET','TELEGRAM_BOT_TOKEN','ADMINUSER']),
+              'HamoonCloud':('/home/hamoondeploy/hamoon-source/.env',['TELEGRAM_BOT_TOKEN','HETZNER_API_TOKEN','OS_AUTH_URL','ZIBAL_MERCHANT'])
+            }
+            for group,(location,keys) in groups.items():
+                print(group)
+                p=Path(location)
+                if not p.is_file():
+                    print('  ENV_FILE_MISSING')
+                    continue
+                values={}
+                for line in p.read_text().splitlines():
+                    if '=' in line and not line.startswith('#'):
+                        k,v=line.split('=',1)
+                        values[k]=v
+                for k in keys:
+                    s=values.get(k,'').strip().strip('"').strip("'")
+                    invalid=not s or s.lower() in ('replace_me','todo','changeme','placeholder','your_token_here','test')
+                    print(' ',k, 'MISSING_OR_PLACEHOLDER' if invalid else 'SET_UNVERIFIED')
+            PY
+            curl -fsS https://127.0.0.1:443/health --resolve 'camcam.smarbiz.sbs:443:127.0.0.1' -H 'Host: camcam.smarbiz.sbs' >/dev/null 2>&1 || true
+            echo READ_ONLY_INTEGRATION_INVENTORY_FINISHED
