@@ -1,3 +1,84 @@
+# Current verified state — 2026-10-23
+
+This section supersedes the historical migration notes below. **The four-project business launch is not fully complete:** BeOnMeet needs interactive Google account authentication and an actual meeting test; Hamoon lacks provider and bot credentials; CamCam lacks an admin allowlist and its real payment flow depends on Hamoon.
+
+## Acceptance matrix
+
+| Project | Deployment | Credentials | Function actually verified | Remaining acceptance |
+|---|---|---|---|---|
+| BebinKarato | Running on 127.0.0.1:8106; independent main-branch redeployment passed | Telegram, Cloudflare and admin credentials imported securely | Telegram getMe and webhook/polling-conflict preflight; real AI parsing, reporting, completion and intent smoke; authenticated admin; isolated task database and reminder dispatch; restart recovery | A conversation initiated by a real Telegram user and real reminder delivery were not sent during this acceptance; voice transcription not exercised |
+| CamCam | API 8107; gateway 8117; PostgreSQL/Redis/MediaMTX and four app roles running | Cloudflare and Firebase validated with real providers; merchant field imported; ADMIN_EMAILS absent | Public signup/session, camera creation/pairing/heartbeat, real synthetic H.264 WebRTC upload, persisted recording, authenticated MP4 download and ffprobe decode, outsider rejection, logout/login; real AI inference and Firebase OAuth | Owner must supply ADMIN_EMAILS; actual user admin session and real payment callback remain blocked; no real payment captured |
+| BeOnMeet | One Chrome, one recorder worker, Redis and controller 8109; isolated controller redeployment passed | Google client credentials, Telegram token and ADMINUSER imported; Telegram provider authentication passed | Controller/Redis/Chrome/worker links, audio sink readiness from existing acceptance, public OAuth redirect/callback-state guard, restart and repeated controller deploy | Calendar OAuth consent absent; recorder Chrome Google login absent/unverified; real Meet recording/audio/file delivery/transcription not tested. Queue stays closed |
+| HamoonCloud | systemd hamoon-dashboard; 127.0.0.1:8108; MariaDB retained; independent deploy passed with dedicated key | Only five HAMOON_SERVER_* connection secrets exist; provider and bot fields absent in Actions and live .env | Live database query, dashboard login route, unauthenticated customer API rejection, source redeploy and restart | Provider authentication, Telegram/Host bots, Zibal/wallet/callback/order/provisioning tests require missing credentials. No wallet credits, purchases or payment writes performed |
+
+### Verified Actions evidence
+
+- [Post-rotation SSH and live inventory](https://github.com/hsdarestani/rednotedownloader/actions/runs/39956211386)
+- [BebinKarato secure activation and real provider preflight](https://github.com/hsdarestani/bebinkarato/actions/runs/39959583683)
+- [BebinKarato successful deployment after merged PR](https://github.com/hsdarestani/bebinkarato/actions/runs/39986645409)
+- [Real BebinKarato AI parsing/report smoke, isolated reminder and real CamCam/Firebase provider checks](https://github.com/hsdarestani/rednotedownloader/actions/runs/39960454712)
+- [CamCam secure integration activation](https://github.com/hsdarestani/cacmcam/actions/runs/39959129888)
+- [CamCam real synthetic camera recording and archive acceptance](https://github.com/hsdarestani/cacmcam/actions/runs/39986423381)
+- [CamCam independent shared-VPS deploy](https://github.com/hsdarestani/cacmcam/actions/runs/39986735498)
+- [Mocked-provider payment concurrency and amount checks on disposable PostgreSQL: 4 tests passed](https://github.com/hsdarestani/cacmcam/actions/runs/39987641093)
+- [BeOnMeet credentials imported without opening queue](https://github.com/hsdarestani/beonmeet/actions/runs/39959754038)
+- [BeOnMeet isolated controller redeployment](https://github.com/hsdarestani/beonmeet/actions/runs/39987203627)
+- [Hamoon live database/authentication-guard verification](https://github.com/hsdarestani/hamoon-private/actions/runs/39986358760)
+- [Hamoon independent source/dashboard deployment](https://github.com/hsdarestani/hamoon-private/actions/runs/39987157003)
+- [Restore of fresh PostgreSQL, MariaDB and SQLite backups into isolated test databases](https://github.com/hsdarestani/rednotedownloader/actions/runs/39960302353)
+- [All four application restart recovery, private ports, env permissions, old-service preservation and monitoring](https://github.com/hsdarestani/rednotedownloader/actions/runs/39987060250)
+- [Public HTTPS, redirects, invalid OAuth state and unauthorized API checks](https://github.com/hsdarestani/rednotedownloader/actions/runs/39987733425)
+
+- [Payment correction deployment (status must be read from this run)](https://github.com/hsdarestani/cacmcam/actions/runs/39987800033)
+
+## Deployment and rollback
+
+All mutating deploy scripts verify IP 143.20.60.195 on SSH port 9011 and take host lock /var/lock/pars-vds-bot-deploy.lock. GitHub concurrency does not cancel an in-flight release. Main runtime secrets are retained rather than overwritten by blank GitHub fields.
+
+- **BebinKarato:** PR [#1](https://github.com/hsdarestani/bebinkarato/pull/1) merged. Main .github/workflows/deploy.yml deploys project bebinkarato-shared, only service app, with public Nginx untouched. It snapshots .env and SQLite, retains an initially untracked compose override before checkout, rebuilds only changed runtime code, and restores previous source/image on failed readiness. The original first post-merge run failed safely before container changes due to the untracked staging compose file; commit 058f141 fixed this and run 39986645409 passed.
+- **CamCam:** main .github/workflows/deploy.yml now targets the shared VPS. One API image is reused for api/pet/archive/petarchive. Deployment snapshots env/config/PostgreSQL, leaves db/redis/mediamtx untouched, updates only application roles, validates/reloads the existing loopback Caddy gateway and keeps prior source/image for rollback. Never start the standalone compose caddy service on host 80/443.
+- **BeOnMeet:** main .github/workflows/deploy.yml validates pushes but deploys only on workflow_dispatch. Manual deployment uses the reviewed ops/shared-vps-source-audit-20261022 runtime branch, checks one-worker idleness, preserves env/state and restarts only beonmeet-controller. It does not rebuild Chrome or create extra workers. Runtime source changes must first be reviewed on that branch. On failed health, restore previous source commit and restart the controller. The legacy multi-Chrome automatic deployment has been replaced.
+- **Hamoon:** main .github/workflows/deploy-dashboard.yml is manual, uses the reviewed ops/shared-vps-source-audit-20261022 branch and HAMOON_SERVER_SSH_KEY with pinned SSH host key. Its source-only archive excludes .env, key files and node_modules. It restarts only hamoon-dashboard.service, not bots or provider jobs. hamoondeploy has a sudoers entry limited to exactly /usr/bin/systemctl restart hamoon-dashboard.service; the service itself runs as hamoondeploy. Retain the prior reviewed source commit for redeployment and keep the live .env/database. No PM2 or old-host deploy is used by this primary workflow.
+- **RisheStore:** PR [#1](https://github.com/hsdarestani/rishestore/pull/1) remains draft and unmerged. Review confirmed its old workflow still recreates Caddy and includes legacy commerce import behavior. Port/lock changes alone are insufficient to authorize that deployment on the shared host. No RisheStore release or data migration was executed.
+
+Important implementation commits: BebinKarato 71da163 and 058f141; CamCam 81e4df1, 73d85a9, 1f5d716 and 6b05427; BeOnMeet a28aab7, bbb6005 and 29239e3; Hamoon 24cc50b and 2c1189a.
+
+### CamCam payment safety
+
+Payment activation was amended to refresh and lock the payment row after provider verification, recheck activation under that lock, serialize user subscription changes and reject malformed amount values. Four tests against an isolated PostgreSQL database and a mocked provider cover simultaneous callbacks granting one period, wrong amount, malformed amount and mismatched intent. This proves those application checks, **not a live Zibal/Hamoon payment integration**. Real payment enablement remains blocked until Hamoon credentials and real gateway callback verification are available.
+
+## Data, backup and host safety
+
+- Fresh existing application databases were retained. No prior-server customer/wallet state was imported.
+- Daily /usr/local/sbin/shared-vps-backup remains enabled, at 03:45 UTC with up to 20 minutes jitter and existing two-day retention. Snapshots are under /var/backups/shared-vps-apps with private permissions.
+- Actual restore acceptance passed for CamCam PostgreSQL and Hamoon MariaDB in separately named disposable databases, and integrity/schema checks passed for copied SQLite snapshots. Only those acceptance-created test databases were removed; live databases were not restored over or deleted.
+- BebinKarato pre-deployment SQLite snapshots live under app/data; env/config and application image/source snapshots are retained for release rollback. These release snapshots have no additional automatic retention policy yet; watch disk usage.
+- No offsite backup destination or credentials were supplied. Local snapshots do not cover full VPS loss; offsite backup remains pending.
+- Nginx retains 80/443. Database, Redis, Chrome CDP 9123, recorder 9124 and noVNC 6081 listeners are private. CamCam's 8189 TCP/UDP remains public for ICE media; its public WebRTC test succeeded through the existing Cloudflare setup.
+- All four .env files passed private-mode checks. Certbot renewal dry-run and safe nginx reload hook had already passed in run 39932095761.
+- Application restarts were rehearsed sequentially; existing RedNote, RisheStore, OrdersVesta and OrdersCutella containers/services remained active. No whole-host reboot was performed; enabled-on-boot settings were checked.
+- shared-vps-resource-check.timer checks every five minutes and emits a journald warning/failure if root disk reaches 90% or MemAvailable drops below 180000 KiB. This is host monitoring, without an external alert destination.
+- Last checked reserve after restart: about 3.1 GiB free disk, 730 MiB MemAvailable, 707 MiB swap used. Builds and further recordings change these values.
+- Synthetic CamCam QA accounts/devices and small synthetic clips were retained as test records; no existing user/device was removed.
+
+## Exact external blockers
+
+**CamCam admin:** set ADMIN_EMAILS in hsdarestani/cacmcam to the intended administrator's email. No arbitrary user was granted admin access.
+
+**Hamoon:** Actions secret UI inspection confirms only HAMOON_SERVER_HOST, HAMOON_SERVER_PATH, HAMOON_SERVER_PORT, HAMOON_SERVER_SSH_KEY and HAMOON_SERVER_USER exist; no environment secrets are configured. Required integration names include TELEGRAM_BOT_TOKEN, HOST_BOT_TOKEN, HETZNER_API_TOKEN, OS_AUTH_URL, OS_USERNAME, OS_PASSWORD, OS_PROJECT_ID (and the selected OpenStack domain/network settings), AFRACLOUD_API_KEY, AFRACLOUD_SECRET_KEY and the configured Zibal merchant credential. Set them through GitHub Secrets or the private server channel, never chat. Do not replace DB credentials, admin session secrets or the fresh database. Provider authentication and controlled payment/callback/wallet acceptance must precede enabling real financial/provisioning actions.
+
+**BeOnMeet:** calendar OAuth token is absent at /opt/beonmeet/data/google-token.json. Complete calendar consent at https://beonmeet.smarbiz.sbs/auth/google using the intended account, and separately sign the recorder's account into its existing Chrome profile. A private local SSH tunnel can reach noVNC without exposing it:
+
+```sh
+ssh -p 9011 -L 6081:127.0.0.1:6081 root@143.20.60.195
+```
+
+Then use the existing noVNC UI at http://127.0.0.1:6081/vnc.html in the tunnel owner's local browser. Never expose CDP/noVNC publicly. After authentication, run one real test meeting, confirm audio, saved/downloadable file, intended-recipient delivery, restart recovery and available transcription provider. Keep BEONMEET_STAGING_NO_POLL=1, FREE_MEETING_SLOTS=0, PREMIUM_MEETING_SLOTS=0 and AUTOSCALE_ENABLED=false until that acceptance passes; then permit at most one local meeting. No large Whisper model was downloaded or tested on this small VPS.
+
+---
+
+# Historical migration record (superseded where it conflicts with the verified state above)
+
 # Fresh installation: four apps on the RedNote shared VPS
 
 **Checked on:** 2026-10-22 22:58 UTC
