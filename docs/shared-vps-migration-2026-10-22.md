@@ -72,3 +72,25 @@ Then issue four hostname certificates with ACME/Certbot, enable Nginx proxy vhos
 - After Nginx reload, all four hostnames were verified to return 503 on the target with their Host headers; existing RedNote, CamCam, BebinKarato, Hamoon and BeOnMeet internal probes still passed.
 - **Important next external action:** Create/update the four DNS A records to `143.20.60.195`, preferably set Cloudflare DNS-only during first HTTP-01 certificate issuance. The user has not yet pointed these domains and there is no Cloudflare DNS management connection in this session. Once A records resolve, use Certbot with HTTP-01 webroot to issue certificates for each hostname; then create SSL 443 proxy vhosts and apply `nginx -t` plus controlled reload.
 - Do not interpret HTTP-503 placeholder responses as live public availability. The apps are healthy on private loopback, not publicly released.
+
+## 2026-10-23 public HTTP(S) release (supersedes earlier DNS/TLS blockers)
+**Public domain/DNS/TLS deployment is COMPLETED and independently checked.** Earlier notes saying that public DNS was not cut over, TLS certificates were missing or HTTP returned 503 are historical and no longer describe the live state.
+
+- [Public ACME routing from external runner confirmed](https://github.com/hsdarestani/rednotedownloader/actions/runs/39931296252): an exact token file from the new VPS was returned with status 200 by all four domains. CamCam remains Cloudflare-proxied.
+- [All four Let's Encrypt certificates issued](https://github.com/hsdarestani/rednotedownloader/actions/runs/39931491245), expire January 21, 2027.
+- [All four new Nginx HTTPS reverse proxies activated](https://github.com/hsdarestani/rednotedownloader/actions/runs/39931797544); existing rishe.store and order site configs preserved. Public port 80 redirects to HTTPS 301 while the dedicated HTTP-01 webroot path remains available for renewal.
+- [Independent public HTTPS QA passed](https://github.com/hsdarestani/rednotedownloader/actions/runs/39931904510): all four `https://<domain>/health` return HTTP 200, valid JSON and trusted HTTPS; four HTTP-to-HTTPS redirects returned 301; CamCam / returned 200 HTML, BeOnMeet / returned 200 HTML, BebinKarato / returned 200 JSON (API app), Hamoon payment host / returned 404 JSON **by application design**, while its /health is 200. Use Hamoon /dashboard/login for the dashboard; do not treat root 404 as gateway failure.
+- [Auto-renew rehearsal passed for all five certificates](https://github.com/hsdarestani/rednotedownloader/actions/runs/39932095761): four new application certs plus existing rishe.store. A Certbot deploy hook validates and reloads Nginx on actual renewals.
+- [Read-only external integration readiness](https://github.com/hsdarestani/rednotedownloader/actions/runs/39932178204): all listed Telegram, Cloudflare AI, Firebase, Google OAuth, Hetzner, OpenStack and Zibal credential **fields remain blank** on the new VPS. No bot polling, real Meet Google authentication, payment capture, or provider provisioning can be called live yet. Do not assume public HTTP health implies working business features.
+
+### HTTPS/public service routing
+| Host | Public HTTPS | Backend |
+|---|---|---|
+| camcam.smarbiz.sbs | Healthy, main HTML | 127.0.0.1:8117 |
+| beonmeet.smarbiz.sbs | Healthy, main HTML | 127.0.0.1:8109 |
+| bebinkarato.smarbiz.sbs | Healthy API | 127.0.0.1:8106 |
+| pay.hamooncloud.ir | Healthy API and payment callback routing, application root 404 by design | 127.0.0.1:8108 |
+
+The current VPS has ~3.2 GB free after certificate issuance, subject to log growth and actual recordings. Existing RedNote, RisheStore and two order bots were validated after public HTTPS release.
+
+**Outstanding:** set valid external secrets on the VPS using a secure channel, authenticate BeOnMeet recorder's Google account, switch on Telegram polling only with valid tokens, and test one real video recording and one provider/payment end-to-end in a non-production test scenario. Separate offsite backups are still not configured. 
