@@ -1,0 +1,42 @@
+name: Provision HTTPS certificates for four staged apps
+on:
+  push:
+    branches: [ops/shared-vps-inventory-20261022]
+    paths: [.github/workflows/shared-vps-certificate-deploy.yml]
+permissions:
+  contents: read
+jobs:
+  certificate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify target host
+        env:
+          SERVER: ${{ secrets.HOST }}
+        run: test "$SERVER" = "143.20.60.195"
+      - name: Obtain HTTPS certificates using challenge webroot
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          username: root
+          port: ${{ secrets.SSH_PORT || '9011' }}
+          password: ${{ secrets.PASS }}
+          command_timeout: 15m
+          script: |
+            set -eu
+            case " $(hostname -I) " in *" 143.20.60.195 "*) : ;; *) exit 1 ;; esac
+            nginx -t
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq
+            apt-get install -y -qq --no-install-recommends certbot
+            certbot --version
+            for domain in camcam.smarbiz.sbs beonmeet.smarbiz.sbs bebinkarato.smarbiz.sbs pay.hamooncloud.ir; do
+              certbot certonly --webroot -w /var/www/shared-vps-acme -d "$domain" --cert-name "$domain" --non-interactive --agree-tos --register-unsafely-without-email --keep-until-expiring
+              openssl x509 -in "/etc/letsencrypt/live/$domain/fullchain.pem" -noout -enddate
+              echo "CERTIFICATE_READY:$domain"
+            done
+            apt-get clean
+            nginx -t
+            systemctl is-active --quiet rednotedownloader
+            systemctl is-active --quiet hamoon-dashboard
+            df -h /
+            echo ALL_CERTIFICATES_ISSUED
