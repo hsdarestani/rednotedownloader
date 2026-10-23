@@ -27,9 +27,9 @@ This section supersedes the historical migration notes below. **The four-project
 - [Hamoon independent source/dashboard deployment](https://github.com/hsdarestani/hamoon-private/actions/runs/39987157003)
 - [Restore of fresh PostgreSQL, MariaDB and SQLite backups into isolated test databases](https://github.com/hsdarestani/rednotedownloader/actions/runs/39960302353)
 - [All four application restart recovery, private ports, env permissions, old-service preservation and monitoring](https://github.com/hsdarestani/rednotedownloader/actions/runs/39987060250)
-- [Public HTTPS, redirects, invalid OAuth state and unauthorized API checks](https://github.com/hsdarestani/rednotedownloader/actions/runs/39987733425)
+- [Public HTTPS, redirects, invalid OAuth state and unauthorized API checks](https://github.com/hsdarestani/rednotedownloader/actions/runs/39988548390)
 
-- [Payment correction deployment (status must be read from this run)](https://github.com/hsdarestani/cacmcam/actions/runs/39987800033)
+- [Payment correction production deployment — PASSED](https://github.com/hsdarestani/cacmcam/actions/runs/39987800033)
 
 ## Deployment and rollback
 
@@ -41,7 +41,11 @@ All mutating deploy scripts verify IP 143.20.60.195 on SSH port 9011 and take ho
 - **Hamoon:** main .github/workflows/deploy-dashboard.yml is manual, uses the reviewed ops/shared-vps-source-audit-20261022 branch and HAMOON_SERVER_SSH_KEY with pinned SSH host key. Its source-only archive excludes .env, key files and node_modules. It restarts only hamoon-dashboard.service, not bots or provider jobs. hamoondeploy has a sudoers entry limited to exactly /usr/bin/systemctl restart hamoon-dashboard.service; the service itself runs as hamoondeploy. Retain the prior reviewed source commit for redeployment and keep the live .env/database. No PM2 or old-host deploy is used by this primary workflow.
 - **RisheStore:** PR [#1](https://github.com/hsdarestani/rishestore/pull/1) remains draft and unmerged. Review confirmed its old workflow still recreates Caddy and includes legacy commerce import behavior. Port/lock changes alone are insufficient to authorize that deployment on the shared host. No RisheStore release or data migration was executed.
 
-Important implementation commits: BebinKarato 71da163 and 058f141; CamCam 81e4df1, 73d85a9, 1f5d716 and 6b05427; BeOnMeet a28aab7, bbb6005 and 29239e3; Hamoon 24cc50b and 2c1189a.
+Important implementation commits:
+- [BebinKarato final deploy fix](https://github.com/hsdarestani/bebinkarato/commit/058f14191a1ed1ca3188e8a325a7177835b2584d)
+- [CamCam shared deployment](https://github.com/hsdarestani/cacmcam/commit/1f5d7165d7f05ca1b38d6f2b5722882ad26c4daa) and [tested payment concurrency fix](https://github.com/hsdarestani/cacmcam/commit/6b054276ca20d854b851cf1babb8eba7f4e630a9)
+- [BeOnMeet safe controller workflow](https://github.com/hsdarestani/beonmeet/commit/bbb600501376aae3bfe91865de6bad0ddebefe06)
+- [Hamoon pinned-host manual dashboard deploy](https://github.com/hsdarestani/hamoon-private/commit/2c1189a3a5a5012250a8f22a137a816ab187b4a9)
 
 ### CamCam payment safety
 
@@ -67,7 +71,7 @@ Payment activation was amended to refresh and lock the payment row after provide
 
 **Hamoon:** Actions secret UI inspection confirms only HAMOON_SERVER_HOST, HAMOON_SERVER_PATH, HAMOON_SERVER_PORT, HAMOON_SERVER_SSH_KEY and HAMOON_SERVER_USER exist; no environment secrets are configured. Required integration names include TELEGRAM_BOT_TOKEN, HOST_BOT_TOKEN, HETZNER_API_TOKEN, OS_AUTH_URL, OS_USERNAME, OS_PASSWORD, OS_PROJECT_ID (and the selected OpenStack domain/network settings), AFRACLOUD_API_KEY, AFRACLOUD_SECRET_KEY and the configured Zibal merchant credential. Set them through GitHub Secrets or the private server channel, never chat. Do not replace DB credentials, admin session secrets or the fresh database. Provider authentication and controlled payment/callback/wallet acceptance must precede enabling real financial/provisioning actions.
 
-**BeOnMeet:** calendar OAuth token is absent at /opt/beonmeet/data/google-token.json. Complete calendar consent at https://beonmeet.smarbiz.sbs/auth/google using the intended account, and separately sign the recorder's account into its existing Chrome profile. A private local SSH tunnel can reach noVNC without exposing it:
+**BeOnMeet:** calendar OAuth token is absent at /opt/beonmeet/data/google-token.json. Complete calendar consent at https://beonmeet.smarbiz.sbs/auth/google using the intended account (the live browser reached Google's BeOnMEET account chooser without a redirect/client error), and separately sign the recorder's account into its existing Chrome profile. A private local SSH tunnel can reach noVNC without exposing it:
 
 ```sh
 ssh -p 9011 -L 6081:127.0.0.1:6081 root@143.20.60.195
